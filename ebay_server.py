@@ -565,7 +565,7 @@ const VEHICLES={"Acura":["ILX","Integra","MDX","NSX","RDX","RLX","TL","TLX","TSX
 
 const MAKES=Object.keys(VEHICLES).sort();
 
-let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null,openAC:null,acFilter:{},acHL:{}};
+let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
 
 function $(sel){return document.querySelector(sel)}
 function h(tag,attrs,...children){
@@ -585,34 +585,58 @@ function makeAC(label,key,options,value,onChange){
   const wrap=h('div',{className:'fg'});
   wrap.appendChild(h('label',{className:'fl'},label));
   const acWrap=h('div',{className:'ac-wrap'});
-  const filter=state.acFilter[key]!=null?state.acFilter[key]:(value||'');
-  const inp=h('input',{className:'fi',placeholder:options.length?'Type to search...':'Select make first',value:filter,on:{
-    focus:()=>{state.openAC=key;state.acFilter[key]=state.acFilter[key]!=null?state.acFilter[key]:'';state.acHL[key]=-1;render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el){el.focus();el.selectionStart=el.value.length;}},10);},
-    input:e=>{state.acFilter[key]=e.target.value;state.acHL[key]=-1;render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el){el.focus();el.selectionStart=el.value.length;}},10);},
+  let hlIdx=-1;
+  let isOpen=false;
+
+  const inp=h('input',{className:'fi',placeholder:options.length?'Type to search...':'Select make first',value:value||'',on:{
+    focus:()=>{isOpen=true;inp.value=inp.value||'';showList();},
+    input:()=>{hlIdx=-1;showList();},
     keydown:e=>{
-      const filtered=options.filter(o=>o.toLowerCase().includes((state.acFilter[key]||'').toLowerCase()));
-      if(e.key==='ArrowDown'){e.preventDefault();state.acHL[key]=Math.min((state.acHL[key]||0)+1,filtered.length-1);render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el)el.focus();},10);}
-      else if(e.key==='ArrowUp'){e.preventDefault();state.acHL[key]=Math.max((state.acHL[key]||0)-1,0);render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el)el.focus();},10);}
-      else if(e.key==='Enter'&&state.acHL[key]>=0&&filtered[state.acHL[key]]){e.preventDefault();state.acFilter[key]=null;state.openAC=null;onChange(filtered[state.acHL[key]]);render();}
-      else if(e.key==='Escape'){state.openAC=null;state.acFilter[key]=null;render();}
+      const items=acWrap.querySelectorAll('.ac-item');
+      if(e.key==='ArrowDown'){e.preventDefault();hlIdx=Math.min(hlIdx+1,items.length-1);highlightItem(items);}
+      else if(e.key==='ArrowUp'){e.preventDefault();hlIdx=Math.max(hlIdx-1,0);highlightItem(items);}
+      else if(e.key==='Enter'&&hlIdx>=0&&items[hlIdx]){e.preventDefault();selectItem(items[hlIdx].textContent);}
+      else if(e.key==='Escape'){closeList();inp.blur();}
     },
-    blur:()=>{setTimeout(()=>{if(state.openAC===key){state.openAC=null;state.acFilter[key]=null;render();}},200);}
+    blur:()=>{setTimeout(()=>{closeList();if(!value&&inp.value)inp.value='';if(value)inp.value=value;},180);}
   }});
-  inp.setAttribute('data-ac',key);
   inp.setAttribute('autocomplete','off');
   acWrap.appendChild(inp);
 
-  if(state.openAC===key){
-    const list=h('div',{className:'ac-list'});
-    const q=(state.acFilter[key]||'').toLowerCase();
+  function showList(){
+    let list=acWrap.querySelector('.ac-list');
+    if(!list){list=h('div',{className:'ac-list'});acWrap.appendChild(list);}
+    list.innerHTML='';
+    const q=(inp.value||'').toLowerCase();
     const filtered=options.filter(o=>o.toLowerCase().includes(q));
     if(filtered.length===0){list.appendChild(h('div',{className:'ac-empty'},'No matches'));}
     else filtered.slice(0,50).forEach((opt,i)=>{
-      const cls='ac-item'+(opt===value?' selected':'')+(i===state.acHL[key]?' hl':'');
-      list.appendChild(h('div',{className:cls,on:{mousedown:e=>{e.preventDefault();state.acFilter[key]=null;state.openAC=null;onChange(opt);}}},opt));
+      const item=h('div',{className:'ac-item'+(opt===value?' selected':''),on:{
+        mousedown:e=>{e.preventDefault();selectItem(opt);}
+      }},opt);
+      list.appendChild(item);
     });
-    acWrap.appendChild(list);
   }
+
+  function highlightItem(items){
+    items.forEach((el,i)=>{el.classList.toggle('hl',i===hlIdx);});
+    if(items[hlIdx])items[hlIdx].scrollIntoView({block:'nearest'});
+  }
+
+  function selectItem(val){
+    isOpen=false;hlIdx=-1;
+    const list=acWrap.querySelector('.ac-list');
+    if(list)list.remove();
+    inp.value=val;
+    onChange(val);
+  }
+
+  function closeList(){
+    isOpen=false;hlIdx=-1;
+    const list=acWrap.querySelector('.ac-list');
+    if(list)list.remove();
+  }
+
   wrap.appendChild(acWrap);
   return wrap;
 }
@@ -938,7 +962,7 @@ async function fetchPricing(){
 
 function resetAll(){
   clearInterval(state.progressTimer);
-  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null,openAC:null,acFilter:{},acHL:{}};
+  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
   render();
 }
 
