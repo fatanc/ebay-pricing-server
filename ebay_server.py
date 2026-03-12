@@ -11,8 +11,9 @@ from typing import Optional
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -336,6 +337,562 @@ async def damage_price_estimate(
         },
         "per_part": estimates,
     }
+
+
+# ── Analyze Endpoint (proxies Anthropic vision API) ──────────────────────────
+
+class AnalyzeRequest(BaseModel):
+    images: list[dict]  # [{media_type: str, data: str (base64)}]
+    vehicle: str
+    mileage: str = ""
+    notes: str = ""
+
+@app.post("/api/analyze")
+async def analyze_damage(req: AnalyzeRequest):
+    """
+    Analyze vehicle damage from images using Claude vision.
+    Keeps the Anthropic API key server-side.
+    """
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(500, "Anthropic API key not configured")
+    if not req.images:
+        raise HTTPException(400, "No images provided")
+
+    # Build message content with images
+    content = []
+    for img in req.images[:8]:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.get("media_type", "image/jpeg"),
+                "data": img["data"],
+            }
+        })
+
+    prompt = f"""You are an expert vehicle damage assessor. Analyze these images of a {req.vehicle}{(' with ' + req.mileage + ' miles') if req.mileage else ''}.
+{('Additional context: ' + req.notes) if req.notes else ''}
+
+Identify ALL visible damage. For each damaged component, provide:
+1. Part name (e.g. "Front bumper cover", "Left headlight assembly", "Hood")
+2. Severity: "critical" (needs immediate replacement), "major" (significant damage, likely replace), "moderate" (repairable), "minor" (cosmetic only)
+3. Damage description
+4. Whether it needs replacement or can be repaired
+5. An eBay search query to find a replacement part (be specific with year/make/model)
+
+Respond ONLY with valid JSON (no markdown, no backticks):
+{{
+  "vehicle": "{req.vehicle}",
+  "overall_assessment": "Brief overall damage summary",
+  "estimated_severity": "total_loss | heavy | moderate | light",
+  "damaged_parts": [
+    {{
+      "part_name": "Front bumper cover",
+      "severity": "critical",
+      "description": "Deep cracks and deformation across the entire bumper face",
+      "action": "Replace",
+      "repair_possible": false,
+      "ebay_query": "{req.vehicle} front bumper cover"
+    }}
+  ]
+}}"""
+
+    content.append({"type": "text", "text": prompt})
+
+    try:
+        resp = await token_mgr.http_client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": content}],
+            },
+            timeout=60,
+        )
+
+        if resp.status_code != 200:
+            error_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            error_msg = error_data.get("error", {}).get("message", f"Anthropic API error: {resp.status_code}")
+            logger.error(f"Anthropic API error: {resp.status_code} - {error_msg}")
+            raise HTTPException(resp.status_code, error_msg)
+
+        data = resp.json()
+        text = "".join(c.get("text", "") for c in data.get("content", []))
+        cleaned = text.replace("```json", "").replace("```", "").strip()
+
+        import json
+        result = json.loads(cleaned)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        raise HTTPException(500, f"Analysis failed: {str(e)}")
+
+
+# ── Frontend HTML ─────────────────────────────────────────────────────────────
+
+FRONTEND_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Salvage Analyst — Vehicle Damage Assessment</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#F8FAFC;--surface:#FFF;--border:#E2E8F0;--border-hover:#CBD5E1;--text-primary:#0F172A;--text-secondary:#475569;--text-tertiary:#94A3B8;--accent:#2563EB;--accent-hover:#1D4ED8;--accent-light:#EFF6FF;--accent-subtle:#DBEAFE;--danger:#EF4444;--success:#10B981;--warning:#F59E0B;--shadow-sm:0 1px 2px rgba(0,0,0,.04);--shadow-md:0 4px 12px rgba(0,0,0,.06);--radius-sm:8px;--radius-md:12px;--radius-lg:16px}
+body{font-family:'DM Sans',-apple-system,sans-serif;background:var(--bg);color:var(--text-primary);-webkit-font-smoothing:antialiased}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes slideIn{from{opacity:0;transform:translateX(-12px)}to{opacity:1;transform:translateX(0)}}
+@keyframes progressGlow{0%,100%{box-shadow:0 0 8px rgba(37,99,235,.3)}50%{box-shadow:0 0 16px rgba(37,99,235,.5)}}
+.app{max-width:960px;margin:0 auto;padding:32px 24px 64px;min-height:100vh}
+.header{text-align:center;margin-bottom:40px;animation:fadeIn .5s ease}
+.logo{display:inline-flex;align-items:center;gap:10px;margin-bottom:8px}
+.logo-icon{width:40px;height:40px;background:var(--accent);border-radius:10px;display:flex;align-items:center;justify-content:center}
+.logo-icon svg{color:#fff}
+.title{font-family:'Space Mono',monospace;font-size:22px;font-weight:700;letter-spacing:-.5px}
+.subtitle{font-size:14px;color:var(--text-tertiary);margin-top:4px}
+.steps{display:flex;align-items:center;justify-content:center;margin-bottom:36px;animation:fadeIn .5s ease .1s both}
+.step{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:13px;font-weight:500;color:var(--text-tertiary)}
+.step.active{color:var(--accent)}
+.step.done{color:var(--success)}
+.step-n{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;background:var(--border);color:var(--text-tertiary);flex-shrink:0}
+.step.active .step-n{background:var(--accent);color:#fff}
+.step.done .step-n{background:var(--success);color:#fff}
+.step-line{width:32px;height:2px;background:var(--border);flex-shrink:0}
+.step-line.done{background:var(--success)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:28px;box-shadow:var(--shadow-sm);animation:fadeIn .4s ease;margin-bottom:20px}
+.card-title{font-size:16px;font-weight:600;margin-bottom:20px;display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;background:var(--accent-light);color:var(--accent)}
+.dropzone{border:2px dashed var(--border);border-radius:var(--radius-md);padding:40px 24px;text-align:center;cursor:pointer;transition:all .2s;background:var(--bg)}
+.dropzone:hover,.dropzone.dragover{border-color:var(--accent);background:var(--accent-light)}
+.dropzone-label{font-size:15px;font-weight:500;color:var(--text-secondary);margin-top:12px}
+.dropzone-sub{font-size:13px;color:var(--text-tertiary);margin-top:4px}
+.img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px;margin-top:16px}
+.img-thumb{position:relative;aspect-ratio:1;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--border)}
+.img-thumb img{width:100%;height:100%;object-fit:cover}
+.img-rm{position:absolute;top:6px;right:6px;width:24px;height:24px;background:rgba(0,0,0,.6);border:none;border-radius:50%;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .15s;font-size:14px}
+.img-thumb:hover .img-rm{opacity:1}
+.form-row{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px}
+.fg{display:flex;flex-direction:column;gap:6px}
+.fl{font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+.fi{padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px;font-family:'DM Sans',sans-serif;color:var(--text-primary);background:var(--bg);transition:border-color .15s;outline:none}
+.fi:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-subtle)}
+.fi::placeholder{color:var(--text-tertiary)}
+textarea.fi{resize:vertical;min-height:72px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:12px 28px;border-radius:var(--radius-sm);font-size:14px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;border:none;transition:all .15s}
+.btn-p{background:var(--accent);color:#fff}
+.btn-p:hover{background:var(--accent-hover);transform:translateY(-1px);box-shadow:var(--shadow-md)}
+.btn-p:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-s{background:var(--bg);color:var(--text-secondary);border:1px solid var(--border)}
+.btn-s:hover{border-color:var(--border-hover);background:#fff}
+.btn-g{background:var(--success);color:#fff}
+.btn-g:hover{background:#059669;transform:translateY(-1px)}
+.btn-row{display:flex;gap:12px;margin-top:24px;justify-content:flex-end}
+.progress{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 24px;animation:fadeIn .4s ease}
+.progress-track{width:100%;height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:24px;max-width:320px}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .4s;animation:progressGlow 2s infinite}
+.progress-label{font-size:18px;font-weight:600;margin-top:20px}
+.progress-sub{font-size:14px;color:var(--text-tertiary);margin-top:6px}
+.rh{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;animation:fadeIn .4s ease}
+.rt{font-family:'Space Mono',monospace;font-size:20px;font-weight:700}
+.sev-badge{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:600;border:1px solid}
+.sev-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.overview{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;margin-bottom:20px;animation:fadeIn .4s ease .1s both}
+.overview-text{font-size:15px;color:var(--text-secondary);line-height:1.6}
+.overview-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:20px}
+.stat{background:var(--bg);border-radius:var(--radius-sm);padding:14px;text-align:center}
+.stat-v{font-family:'Space Mono',monospace;font-size:22px;font-weight:700}
+.stat-l{font-size:11px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+.pc{border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;margin-bottom:12px;background:var(--surface);transition:box-shadow .2s;animation:slideIn .3s ease both}
+.pc:hover{box-shadow:var(--shadow-md)}
+.pc-h{display:flex;align-items:center;gap:14px;padding:16px 20px;cursor:pointer;user-select:none}
+.pc-sev{width:4px;height:36px;border-radius:2px;flex-shrink:0}
+.pc-info{flex:1}
+.pc-name{font-size:15px;font-weight:600}
+.pc-action{font-size:13px;color:var(--text-secondary);margin-top:2px}
+.pc-chev{color:var(--text-tertiary);transition:transform .2s;flex-shrink:0}
+.pc-chev.open{transform:rotate(90deg)}
+.pc-body{padding:0 20px 20px;border-top:1px solid var(--border);animation:fadeIn .2s ease}
+.pc-desc{font-size:14px;color:var(--text-secondary);line-height:1.6;padding-top:16px}
+.pr-card{border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;margin-bottom:16px;background:var(--surface);animation:fadeIn .4s ease both}
+.pr-head{padding:18px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:var(--bg)}
+.pr-name{font-size:15px;font-weight:600}
+.pr-avg{font-family:'Space Mono',monospace;font-size:18px;font-weight:700;color:var(--accent)}
+.pr-range{font-size:12px;color:var(--text-tertiary);margin-top:2px}
+.lg{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;padding:16px 20px}
+.li{display:flex;gap:12px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);transition:all .15s;text-decoration:none;color:inherit}
+.li:hover{border-color:var(--accent);background:var(--accent-light);transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.li-img{width:56px;height:56px;border-radius:6px;object-fit:cover;background:var(--bg);flex-shrink:0}
+.li-info{flex:1;min-width:0}
+.li-title{font-size:13px;font-weight:500;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.li-meta{display:flex;align-items:center;gap:8px;margin-top:4px}
+.li-price{font-family:'Space Mono',monospace;font-size:14px;font-weight:700;color:var(--success)}
+.li-cond{font-size:11px;color:var(--text-tertiary);padding:1px 6px;background:var(--bg);border-radius:4px}
+.total-bar{background:var(--surface);border:2px solid var(--accent);border-radius:var(--radius-lg);padding:24px 28px;display:flex;align-items:center;justify-content:space-between;margin-top:24px;animation:fadeIn .4s ease .3s both}
+.total-v{font-family:'Space Mono',monospace;font-size:28px;font-weight:700;color:var(--accent)}
+.total-r{font-size:13px;color:var(--text-tertiary);margin-top:2px;text-align:right}
+.error{background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;padding:12px 16px;border-radius:var(--radius-sm);font-size:14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;animation:fadeIn .3s ease}
+.spinner{width:24px;height:24px;animation:spin 1s linear infinite}
+@media(max-width:640px){.form-row{grid-template-columns:1fr 1fr}.overview-stats{grid-template-columns:1fr 1fr}.lg{grid-template-columns:1fr}.app{padding:20px 16px 48px}.step{padding:6px 8px;font-size:12px}}
+</style>
+</head>
+<body>
+<div id="app" class="app"></div>
+<script>
+const API = '';
+const SEV = {critical:{bg:'#FEE2E2',bd:'#F87171',tx:'#991B1B',dot:'#EF4444'},major:{bg:'#FEF3C7',bd:'#FBBF24',tx:'#92400E',dot:'#F59E0B'},moderate:{bg:'#FEF9C3',bd:'#FACC15',tx:'#854D0E',dot:'#EAB308'},minor:{bg:'#ECFDF5',bd:'#6EE7B7',tx:'#065F46',dot:'#10B981'}};
+const SLABEL = {critical:'Replace',major:'Repair / Replace',moderate:'Repair',minor:'Inspect'};
+
+let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+
+function $(sel){return document.querySelector(sel)}
+function h(tag,attrs,...children){
+  const el=document.createElement(tag);
+  if(attrs)Object.entries(attrs).forEach(([k,v])=>{
+    if(k==='on'&&typeof v==='object')Object.entries(v).forEach(([ev,fn])=>el.addEventListener(ev,fn));
+    else if(k==='style'&&typeof v==='object')Object.assign(el.style,v);
+    else if(k==='className')el.className=v;
+    else if(k==='innerHTML')el.innerHTML=v;
+    else el.setAttribute(k,v);
+  });
+  children.flat(Infinity).filter(c=>c!=null&&c!==false).forEach(c=>el.appendChild(typeof c==='string'?document.createTextNode(c):c));
+  return el;
+}
+
+function render(){
+  const app=$('#app');
+  app.innerHTML='';
+  app.appendChild(renderHeader());
+  app.appendChild(renderSteps());
+  if(state.error&&state.step==='upload')app.appendChild(renderError());
+  if(state.step==='upload')renderUpload(app);
+  else if(state.step==='analyzing')app.appendChild(renderAnalyzing());
+  else if(state.step==='results')renderResults(app);
+  else if(state.step==='pricing')renderPricing(app);
+}
+
+function renderHeader(){
+  return h('div',{className:'header'},
+    h('div',{className:'logo'},
+      h('div',{className:'logo-icon',innerHTML:'<svg width="22" height="22" fill="none" viewBox="0 0 24 24"><path d="M5 17h1m12 0h1M3 11l2-6h14l2 6M3 11v6h18v-6M3 11h18M7.5 17a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm9 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+      h('div',{className:'title'},'SALVAGE ANALYST')),
+    h('div',{className:'subtitle'},'AI-powered vehicle damage assessment & parts pricing'));
+}
+
+function renderSteps(){
+  const sn=state.step==='upload'?1:state.step==='analyzing'?2:state.step==='results'?3:4;
+  const wrap=h('div',{className:'steps'});
+  [{n:1,l:'Upload'},{n:2,l:'Analysis'},{n:3,l:'Results'},{n:4,l:'Pricing'}].forEach((s,i)=>{
+    if(i>0)wrap.appendChild(h('div',{className:'step-line'+(sn>s.n-1?' done':'')}));
+    const cls='step'+(sn===s.n?' active':'')+(sn>s.n?' done':'');
+    wrap.appendChild(h('div',{className:cls},h('div',{className:'step-n'},sn>s.n?'✓':String(s.n)),h('span',null,s.l)));
+  });
+  return wrap;
+}
+
+function renderError(){
+  return h('div',{className:'error'},
+    h('span',null,state.error),
+    h('button',{style:{background:'none',border:'none',cursor:'pointer',color:'#991B1B',fontSize:'16px'},on:{click:()=>{state.error=null;render();}}},'✕'));
+}
+
+function renderUpload(app){
+  // Photos card
+  const card1=h('div',{className:'card'});
+  card1.appendChild(h('div',{className:'card-title'},
+    h('span',{innerHTML:'<svg width="18" height="18" fill="none" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="1.5"/><circle cx="8.5" cy="8.5" r="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M21 15l-5-5L5 21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+    ' Damage Photos ',
+    h('span',{className:'badge'},state.images.length+'/8')));
+
+  const inp=h('input',{type:'file',accept:'image/*',multiple:true,style:{display:'none'},on:{change:e=>handleFiles(e.target.files)}});
+  card1.appendChild(inp);
+
+  const dz=h('div',{className:'dropzone',on:{
+    click:()=>inp.click(),
+    drop:e=>{e.preventDefault();e.currentTarget.classList.remove('dragover');handleFiles(e.dataTransfer.files);},
+    dragover:e=>{e.preventDefault();e.currentTarget.classList.add('dragover');},
+    dragleave:e=>{e.preventDefault();e.currentTarget.classList.remove('dragover');}
+  }},
+    h('div',{innerHTML:'<svg width="48" height="48" fill="none" viewBox="0 0 48 48"><path d="M24 32V16m0 0l-8 8m8-8l8 8" stroke="#94A3B8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="4" width="40" height="40" rx="12" stroke="#CBD5E1" stroke-width="2" stroke-dasharray="6 4"/></svg>'}),
+    h('div',{className:'dropzone-label'},'Drop photos here or click to browse'),
+    h('div',{className:'dropzone-sub'},'Upload up to 8 images · JPG, PNG, WebP'));
+  card1.appendChild(dz);
+
+  if(state.previews.length>0){
+    const grid=h('div',{className:'img-grid'});
+    state.previews.forEach((p,i)=>{
+      const thumb=h('div',{className:'img-thumb'},
+        h('img',{src:p}),
+        h('button',{className:'img-rm',on:{click:e=>{e.stopPropagation();state.images.splice(i,1);state.previews.splice(i,1);render();}}},'✕'));
+      grid.appendChild(thumb);
+    });
+    card1.appendChild(grid);
+  }
+  app.appendChild(card1);
+
+  // Vehicle card
+  const card2=h('div',{className:'card'});
+  card2.appendChild(h('div',{className:'card-title'},
+    h('span',{innerHTML:'<svg width="22" height="22" fill="none" viewBox="0 0 24 24"><path d="M5 17h1m12 0h1M3 11l2-6h14l2 6M3 11v6h18v-6M3 11h18M7.5 17a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm9 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+    ' Vehicle Information'));
+
+  const row=h('div',{className:'form-row'});
+  [['Year','year','2020'],['Make','make','Toyota'],['Model','model','Camry'],['Trim','trim','SE']].forEach(([l,k,p])=>{
+    row.appendChild(h('div',{className:'fg'},
+      h('label',{className:'fl'},l+(k!=='trim'?' *':'')),
+      h('input',{className:'fi',placeholder:p,value:state.vehicle[k],on:{input:e=>{state.vehicle[k]=e.target.value;}}})));
+  });
+  card2.appendChild(row);
+
+  const row2=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 2fr',gap:'12px',marginTop:'12px'}});
+  row2.appendChild(h('div',{className:'fg'},
+    h('label',{className:'fl'},'Mileage'),
+    h('input',{className:'fi',placeholder:'45,000',value:state.mileage,on:{input:e=>{state.mileage=e.target.value;}}})));
+  row2.appendChild(h('div',{className:'fg'},
+    h('label',{className:'fl'},'Additional Notes'),
+    h('textarea',{className:'fi',placeholder:'E.g. front-end collision, side impact, hail damage...',value:state.notes,on:{input:e=>{state.notes=e.target.value;}}})));
+  card2.appendChild(row2);
+
+  const btnRow=h('div',{className:'btn-row'});
+  const btn=h('button',{className:'btn btn-p',on:{click:analyze}},
+    h('span',{innerHTML:'<svg width="18" height="18" fill="none" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'}),
+    ' Analyze Damage');
+  if(state.images.length===0)btn.disabled=true;
+  btnRow.appendChild(btn);
+  card2.appendChild(btnRow);
+  app.appendChild(card2);
+}
+
+function renderAnalyzing(){
+  const wrap=h('div',{className:'progress'});
+  wrap.appendChild(h('div',{innerHTML:'<svg width="24" height="24" viewBox="0 0 24 24" style="animation:spin 1s linear infinite"><circle cx="12" cy="12" r="10" stroke="#CBD5E1" stroke-width="3" fill="none"/><path d="M12 2a10 10 0 019.8 8" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" fill="none"/></svg>'}));
+  const msg=state.progress<30?'Examining photos...':state.progress<60?'Identifying damaged components...':state.progress<85?'Assessing severity levels...':'Finalizing report...';
+  wrap.appendChild(h('div',{className:'progress-label'},'Analyzing vehicle damage...'));
+  wrap.appendChild(h('div',{className:'progress-sub'},msg));
+  const track=h('div',{className:'progress-track'});
+  track.appendChild(h('div',{className:'progress-fill',style:{width:state.progress+'%'}}));
+  wrap.appendChild(track);
+  return wrap;
+}
+
+function renderResults(app){
+  const r=state.result;if(!r)return;
+  const parts=r.damaged_parts||[];
+  const counts={critical:0,major:0,moderate:0,minor:0};
+  parts.forEach(p=>counts[p.severity]=(counts[p.severity]||0)+1);
+  const os=r.estimated_severity||'moderate';
+  const oc=SEV[os==='total_loss'||os==='heavy'?'critical':os==='moderate'?'major':'minor'];
+
+  const hdr=h('div',{className:'rh'});
+  const left=h('div',null,
+    h('div',{className:'rt'},'Damage Assessment'),
+    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+(state.vehicle.trim?' '+state.vehicle.trim:'')));
+  const badge=h('div',{className:'sev-badge',style:{background:oc.bg,borderColor:oc.bd,color:oc.tx}},
+    h('span',{className:'sev-dot',style:{background:oc.dot}}),' ',os.replace('_',' ').toUpperCase());
+  hdr.appendChild(left);hdr.appendChild(badge);
+  app.appendChild(hdr);
+
+  const ov=h('div',{className:'overview'});
+  ov.appendChild(h('div',{className:'overview-text'},r.overall_assessment));
+  const stats=h('div',{className:'overview-stats'});
+  [['critical','#EF4444'],['major','#F59E0B'],['moderate','#EAB308'],['minor','#10B981']].forEach(([k,c])=>{
+    stats.appendChild(h('div',{className:'stat'},
+      h('div',{className:'stat-v',style:{color:c}},String(counts[k]||0)),
+      h('div',{className:'stat-l'},k.charAt(0).toUpperCase()+k.slice(1))));
+  });
+  ov.appendChild(stats);
+  app.appendChild(ov);
+
+  parts.forEach((p,i)=>{
+    const s=SEV[p.severity]||SEV.minor;
+    const open=state.expanded===i;
+    const pc=h('div',{className:'pc',style:{animationDelay:i*60+'ms'}});
+    const hd=h('div',{className:'pc-h',on:{click:()=>{state.expanded=open?null:i;render();}}},
+      h('div',{className:'pc-sev',style:{background:s.dot}}),
+      h('div',{className:'pc-info'},
+        h('div',{className:'pc-name'},p.part_name),
+        h('div',{className:'pc-action'},
+          h('span',{style:{color:s.tx,fontWeight:'500'}},SLABEL[p.severity]||'Inspect'),' · ',p.action)),
+      h('div',{className:'sev-badge',style:{background:s.bg,borderColor:s.bd,color:s.tx,fontSize:'12px',padding:'3px 10px'}},
+        h('span',{className:'sev-dot',style:{background:s.dot,width:'6px',height:'6px'}}),' ',p.severity),
+      h('div',{className:'pc-chev'+(open?' open':''),innerHTML:'<svg width="16" height="16" fill="none" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
+    pc.appendChild(hd);
+    if(open){
+      const body=h('div',{className:'pc-body'},
+        h('div',{className:'pc-desc'},p.description),
+        h('div',{style:{marginTop:'12px',fontSize:'13px',color:'var(--text-tertiary)'}},
+          h('strong',{style:{color:'var(--text-secondary)'}},'Repair possible: '),p.repair_possible?'Yes':'No'));
+      pc.appendChild(body);
+    }
+    app.appendChild(pc);
+  });
+
+  const btnRow=h('div',{className:'btn-row'});
+  btnRow.appendChild(h('button',{className:'btn btn-s',on:{click:resetAll}},'Start Over'));
+  btnRow.appendChild(h('button',{className:'btn btn-g',on:{click:fetchPricing}},
+    h('span',{innerHTML:'<svg width="16" height="16" fill="none" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 100 7h5a3.5 3.5 0 110 7H6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+    ' Look Up eBay Prices'));
+  app.appendChild(btnRow);
+}
+
+function renderPricing(app){
+  if(state.pricingLoading){
+    const wrap=h('div',{className:'progress'});
+    wrap.appendChild(h('div',{innerHTML:'<svg width="24" height="24" viewBox="0 0 24 24" style="animation:spin 1s linear infinite"><circle cx="12" cy="12" r="10" stroke="#CBD5E1" stroke-width="3" fill="none"/><path d="M12 2a10 10 0 019.8 8" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" fill="none"/></svg>'}));
+    wrap.appendChild(h('div',{className:'progress-label'},'Searching eBay for parts...'));
+    wrap.appendChild(h('div',{className:'progress-sub'},'Finding the best prices across thousands of listings'));
+    app.appendChild(wrap);return;
+  }
+  if(!state.pricing)return;
+  const pd=state.pricing;
+
+  const hdr=h('div',{className:'rh'});
+  hdr.appendChild(h('div',null,
+    h('div',{className:'rt'},'Parts & Pricing'),
+    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},
+      state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+' · '+pd.length+' parts priced')));
+  app.appendChild(hdr);
+
+  pd.forEach((d,idx)=>{
+    const card=h('div',{className:'pr-card',style:{animationDelay:idx*100+'ms'}});
+    const head=h('div',{className:'pr-head'});
+    head.appendChild(h('div',null,
+      h('div',{className:'pr-name'},d.part),
+      h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'2px'}},(d.total||0).toLocaleString()+' listings found')));
+    const right=h('div',{style:{textAlign:'right'}});
+    right.appendChild(h('div',{className:'pr-avg'},d.avg_price?'$'+d.avg_price.toFixed(0):'N/A'));
+    if(d.min_price)right.appendChild(h('div',{className:'pr-range'},'$'+d.min_price.toFixed(0)+' – $'+d.max_price.toFixed(0)));
+    head.appendChild(right);
+    card.appendChild(head);
+
+    if(d.results&&d.results.length>0){
+      const grid=h('div',{className:'lg'});
+      d.results.slice(0,6).forEach(li=>{
+        const a=h('a',{className:'li',href:li.item_url,target:'_blank',rel:'noopener noreferrer'});
+        if(li.image_url)a.appendChild(h('img',{className:'li-img',src:li.image_url,alt:''}));
+        else a.appendChild(h('div',{className:'li-img',style:{display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-tertiary)'},innerHTML:'<svg width="22" height="22" fill="none" viewBox="0 0 24 24"><path d="M5 17h1m12 0h1M3 11l2-6h14l2 6M3 11v6h18v-6M3 11h18" stroke="currentColor" stroke-width="1.5"/></svg>'}));
+        const info=h('div',{className:'li-info'});
+        info.appendChild(h('div',{className:'li-title'},li.title));
+        const meta=h('div',{className:'li-meta'});
+        meta.appendChild(h('span',{className:'li-price'},'$'+(li.price||0).toFixed(2)));
+        if(li.condition)meta.appendChild(h('span',{className:'li-cond'},li.condition));
+        info.appendChild(meta);
+        a.appendChild(info);
+        a.appendChild(h('div',{style:{color:'var(--text-tertiary)',flexShrink:0,alignSelf:'center'},innerHTML:'<svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
+        grid.appendChild(a);
+      });
+      card.appendChild(grid);
+    }
+    app.appendChild(card);
+  });
+
+  const tAvg=pd.reduce((s,p)=>s+(p.avg_price||0),0);
+  const tMin=pd.reduce((s,p)=>s+(p.min_price||0),0);
+  const tMax=pd.reduce((s,p)=>s+(p.max_price||0),0);
+  const total=h('div',{className:'total-bar'});
+  total.appendChild(h('div',null,h('div',{style:{fontSize:'16px',fontWeight:'600',color:'var(--text-secondary)'}},'Estimated Total Parts Cost')));
+  total.appendChild(h('div',null,
+    h('div',{className:'total-v'},'$'+tAvg.toFixed(0)),
+    h('div',{className:'total-r'},'$'+tMin.toFixed(0)+' – $'+tMax.toFixed(0)+' range')));
+  app.appendChild(total);
+
+  const btnRow=h('div',{className:'btn-row'});
+  btnRow.appendChild(h('button',{className:'btn btn-s',on:{click:()=>{state.step='results';render();}}},'← Back to Assessment'));
+  btnRow.appendChild(h('button',{className:'btn btn-s',on:{click:resetAll}},'New Analysis'));
+  app.appendChild(btnRow);
+}
+
+function handleFiles(files){
+  const newFiles=Array.from(files).filter(f=>f.type.startsWith('image/')).slice(0,8-state.images.length);
+  newFiles.forEach(f=>{
+    state.images.push(f);
+    const r=new FileReader();
+    r.onload=e=>{state.previews.push(e.target.result);render();};
+    r.readAsDataURL(f);
+  });
+}
+
+async function analyze(){
+  if(state.images.length===0){state.error='Please upload at least one image';render();return;}
+  if(!state.vehicle.year||!state.vehicle.make||!state.vehicle.model){state.error='Please fill in vehicle year, make, and model';render();return;}
+  state.error=null;state.step='analyzing';state.progress=0;render();
+
+  state.progressTimer=setInterval(()=>{state.progress=Math.min(state.progress+Math.random()*12,90);render();},800);
+
+  try{
+    const imgs=await Promise.all(state.images.map(f=>new Promise(res=>{
+      const r=new FileReader();
+      r.onload=e=>{const b64=e.target.result.split(',')[1];res({media_type:f.type||'image/jpeg',data:b64});};
+      r.readAsDataURL(f);
+    })));
+
+    const vehicleStr=state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+(state.vehicle.trim?' '+state.vehicle.trim:'');
+    const resp=await fetch(API+'/api/analyze',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({images:imgs,vehicle:vehicleStr,mileage:state.mileage,notes:state.notes})
+    });
+
+    clearInterval(state.progressTimer);
+
+    if(!resp.ok){
+      const err=await resp.json().catch(()=>({}));
+      throw new Error(err.detail||'Analysis failed: '+resp.status);
+    }
+    state.result=await resp.json();
+    state.progress=100;render();
+    setTimeout(()=>{state.step='results';render();},400);
+  }catch(e){
+    clearInterval(state.progressTimer);
+    state.error=e.message||'Analysis failed';state.step='upload';render();
+  }
+}
+
+async function fetchPricing(){
+  if(!state.result)return;
+  state.pricingLoading=true;state.step='pricing';render();
+  try{
+    const vehicleStr=state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model;
+    const parts=state.result.damaged_parts.filter(p=>p.severity==='critical'||p.severity==='major'||p.action==='Replace');
+    const results=await Promise.all(parts.map(async p=>{
+      try{
+        const q=p.ebay_query||vehicleStr+' '+p.part_name;
+        const r=await fetch(API+'/api/search?'+new URLSearchParams({q,limit:'6'}));
+        if(!r.ok)throw new Error();
+        const d=await r.json();
+        return{part:p.part_name,severity:p.severity,query:q,...d};
+      }catch{return{part:p.part_name,severity:p.severity,total:0,results:[],avg_price:null,min_price:null,max_price:null};}
+    }));
+    state.pricing=results;
+  }catch{state.error='Failed to fetch pricing';}
+  finally{state.pricingLoading=false;render();}
+}
+
+function resetAll(){
+  clearInterval(state.progressTimer);
+  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+  render();
+}
+
+render();
+</script>
+</body>
+</html>"""
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the Salvage Analyst frontend."""
+    return FRONTEND_HTML
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
