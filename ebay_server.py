@@ -370,32 +370,48 @@ async def analyze_damage(req: AnalyzeRequest):
             }
         })
 
-    prompt = f"""You are an expert vehicle damage assessor. Analyze these images of a {req.vehicle}{(' with ' + req.mileage + ' miles') if req.mileage else ''}.
+    prompt = f"""You are an expert vehicle damage assessor and insurance adjuster with 20 years of experience. Analyze these images of a {req.vehicle}{(' with ' + req.mileage + ' miles') if req.mileage else ''}.
 {('Additional context: ' + req.notes) if req.notes else ''}
 
-Identify ALL visible damage. For each damaged component, provide:
-1. Part name (e.g. "Front bumper cover", "Left headlight assembly", "Hood")
-2. Severity: "critical" (needs immediate replacement), "major" (significant damage, likely replace), "moderate" (repairable), "minor" (cosmetic only)
-3. Damage description
-4. Whether it needs replacement or can be repaired
-5. An eBay search query to find a replacement part (be specific with year/make/model)
+Perform a thorough professional assessment. For each damaged component, provide detailed analysis.
 
 Respond ONLY with valid JSON (no markdown, no backticks):
 {{
   "vehicle": "{req.vehicle}",
-  "overall_assessment": "Brief overall damage summary",
+  "overall_assessment": "2-3 sentence professional summary of the damage",
   "estimated_severity": "total_loss | heavy | moderate | light",
+  "structural_integrity": "compromised | likely_safe | safe",
+  "driveable": true or false,
+  "safety_concerns": ["List any safety issues, e.g. airbag deployed, structural damage, lighting failure"],
+  "recommended_next_steps": ["e.g. Get structural frame check", "Replace all lighting before driving"],
   "damaged_parts": [
     {{
       "part_name": "Front bumper cover",
-      "severity": "critical",
-      "description": "Deep cracks and deformation across the entire bumper face",
-      "action": "Replace",
+      "category": "body | lighting | glass | mechanical | structural | interior | electrical",
+      "severity": "critical | major | moderate | minor",
+      "confidence": 85,
+      "damage_type": "crack | dent | scratch | shatter | deformation | puncture | discoloration | misalignment",
+      "description": "Detailed description of the visible damage",
+      "action": "Replace | Repair | Repair or Replace | Monitor",
       "repair_possible": false,
+      "repair_difficulty": "easy | moderate | hard | specialist",
+      "labor_hours_estimate": 1.5,
+      "paint_required": true,
+      "oem_vs_aftermarket": "OEM recommended | Aftermarket OK | Either",
+      "hidden_damage_risk": "low | medium | high",
+      "hidden_damage_note": "Brief note about what hidden damage to check for",
       "ebay_query": "{req.vehicle} front bumper cover"
     }}
   ]
-}}"""
+}}
+
+Important guidelines:
+- confidence is 0-100, how confident you are in the assessment from the photos
+- labor_hours_estimate is for a professional body shop
+- hidden_damage_risk flags parts where damage behind visible panels is likely
+- Be specific about damage_type, not generic
+- Always flag safety concerns prominently
+- For structural parts, always recommend professional inspection"""
 
     content.append({"type": "text", "text": prompt})
 
@@ -550,6 +566,36 @@ textarea.fi{resize:vertical;min-height:72px}
 .ac-item:hover,.ac-item.hl{background:var(--accent-light);color:var(--accent)}
 .ac-item.selected{font-weight:600;color:var(--accent)}
 .ac-empty{padding:10px 14px;font-size:13px;color:var(--text-tertiary);font-style:italic}
+.alert-bar{display:flex;align-items:flex-start;gap:12px;padding:16px 20px;border-radius:var(--radius-md);margin-bottom:16px;font-size:14px;line-height:1.5;animation:fadeIn .4s ease}
+.alert-bar.warn{background:#FEF3C7;border:1px solid #FDE68A;color:#92400E}
+.alert-bar.danger{background:#FEE2E2;border:1px solid #FECACA;color:#991B1B}
+.alert-bar.info{background:var(--accent-light);border:1px solid var(--accent-subtle);color:#1E40AF}
+.alert-bar.ok{background:#ECFDF5;border:1px solid #A7F3D0;color:#065F46}
+.alert-icon{flex-shrink:0;margin-top:1px}
+.tag{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.3px}
+.tag-body{background:#DBEAFE;color:#1E40AF}
+.tag-lighting{background:#FEF3C7;color:#92400E}
+.tag-glass{background:#E0E7FF;color:#3730A3}
+.tag-mechanical{background:#F3E8FF;color:#6B21A8}
+.tag-structural{background:#FEE2E2;color:#991B1B}
+.tag-interior{background:#F0FDF4;color:#166534}
+.tag-electrical{background:#FFF7ED;color:#9A3412}
+.conf-bar{width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:6px}
+.conf-fill{height:100%;border-radius:2px;transition:width .6s ease}
+.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 20px;margin-top:16px}
+.detail-item{display:flex;flex-direction:column;gap:2px}
+.detail-label{font-size:11px;font-weight:600;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.5px}
+.detail-value{font-size:13px;color:var(--text-primary);font-weight:500}
+.hidden-risk{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:var(--radius-sm);margin-top:12px;font-size:13px}
+.hidden-risk.low{background:#F0FDF4;color:#166534;border:1px solid #BBF7D0}
+.hidden-risk.medium{background:#FEF9C3;color:#854D0E;border:1px solid #FDE68A}
+.hidden-risk.high{background:#FEE2E2;color:#991B1B;border:1px solid #FECACA}
+.next-steps{margin-top:20px;padding:20px;background:var(--bg);border-radius:var(--radius-md);border:1px solid var(--border)}
+.next-step-item{display:flex;align-items:flex-start;gap:10px;padding:8px 0;font-size:14px;color:var(--text-secondary)}
+.next-step-item+.next-step-item{border-top:1px solid var(--border)}
+.next-step-num{width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.labor-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:16px;padding:16px;background:var(--bg);border-radius:var(--radius-md)}
+@media(max-width:640px){.detail-grid{grid-template-columns:1fr}.labor-summary{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -774,50 +820,181 @@ function renderResults(app){
   parts.forEach(p=>counts[p.severity]=(counts[p.severity]||0)+1);
   const os=r.estimated_severity||'moderate';
   const oc=SEV[os==='total_loss'||os==='heavy'?'critical':os==='moderate'?'major':'minor'];
+  const vName=state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+(state.vehicle.trim?' '+state.vehicle.trim:'');
 
+  // Header
   const hdr=h('div',{className:'rh'});
-  const left=h('div',null,
+  hdr.appendChild(h('div',null,
     h('div',{className:'rt'},'Damage Assessment'),
-    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+(state.vehicle.trim?' '+state.vehicle.trim:'')));
+    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},vName)));
   const badge=h('div',{className:'sev-badge',style:{background:oc.bg,borderColor:oc.bd,color:oc.tx}},
     h('span',{className:'sev-dot',style:{background:oc.dot}}),' ',os.replace('_',' ').toUpperCase());
-  hdr.appendChild(left);hdr.appendChild(badge);
+  hdr.appendChild(badge);
   app.appendChild(hdr);
 
+  // Safety alerts
+  if(r.driveable===false){
+    app.appendChild(h('div',{className:'alert-bar danger'},
+      h('div',{className:'alert-icon',innerHTML:'<svg width="20" height="20" fill="none" viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+      h('div',null,h('strong',null,'Vehicle is NOT driveable'),' — Do not operate this vehicle. Tow to a repair facility for inspection.')));
+  }
+  if(r.structural_integrity==='compromised'){
+    app.appendChild(h('div',{className:'alert-bar danger'},
+      h('div',{className:'alert-icon',innerHTML:'<svg width="20" height="20" fill="none" viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+      h('div',null,h('strong',null,'Structural integrity may be compromised'),' — Professional frame/unibody inspection strongly recommended before any repair decisions.')));
+  }
+  if(r.safety_concerns&&r.safety_concerns.length>0){
+    const sc=h('div',{className:'alert-bar warn'},
+      h('div',{className:'alert-icon',innerHTML:'<svg width="20" height="20" fill="none" viewBox="0 0 24 24"><path d="M12 8v4m0 4h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/></svg>'}),
+      h('div',null));
+    sc.lastChild.appendChild(h('strong',null,'Safety concerns identified:'));
+    const ul=h('div',{style:{marginTop:'4px'}});
+    r.safety_concerns.forEach(c=>ul.appendChild(h('div',{style:{padding:'2px 0'}},'\u26A0 '+c)));
+    sc.lastChild.appendChild(ul);
+    app.appendChild(sc);
+  }
+
+  // Overview card with better stats
   const ov=h('div',{className:'overview'});
   ov.appendChild(h('div',{className:'overview-text'},r.overall_assessment));
+
   const stats=h('div',{className:'overview-stats'});
-  [['critical','#EF4444'],['major','#F59E0B'],['moderate','#EAB308'],['minor','#10B981']].forEach(([k,c])=>{
+  [['critical','#EF4444','Critical'],['major','#F59E0B','Major'],['moderate','#EAB308','Moderate'],['minor','#10B981','Minor']].forEach(([k,c,l])=>{
     stats.appendChild(h('div',{className:'stat'},
       h('div',{className:'stat-v',style:{color:c}},String(counts[k]||0)),
-      h('div',{className:'stat-l'},k.charAt(0).toUpperCase()+k.slice(1))));
+      h('div',{className:'stat-l'},l)));
   });
   ov.appendChild(stats);
+
+  // Labor & repair summary
+  const totalHours=parts.reduce((s,p)=>s+(p.labor_hours_estimate||0),0);
+  const replaceCount=parts.filter(p=>p.action==='Replace').length;
+  const paintCount=parts.filter(p=>p.paint_required).length;
+  const ls=h('div',{className:'labor-summary'});
+  ls.appendChild(h('div',{className:'stat'},
+    h('div',{className:'stat-v',style:{color:'var(--accent)'}},totalHours.toFixed(1)+'h'),
+    h('div',{className:'stat-l'},'Est. Labor')));
+  ls.appendChild(h('div',{className:'stat'},
+    h('div',{className:'stat-v',style:{color:'var(--danger)'}},String(replaceCount)),
+    h('div',{className:'stat-l'},'Need Replacement')));
+  ls.appendChild(h('div',{className:'stat'},
+    h('div',{className:'stat-v',style:{color:'#7C3AED'}},String(paintCount)),
+    h('div',{className:'stat-l'},'Need Paint')));
+  ov.appendChild(ls);
   app.appendChild(ov);
 
-  parts.forEach((p,i)=>{
-    const s=SEV[p.severity]||SEV.minor;
-    const open=state.expanded===i;
-    const pc=h('div',{className:'pc',style:{animationDelay:i*60+'ms'}});
-    const hd=h('div',{className:'pc-h',on:{click:()=>{state.expanded=open?null:i;render();}}},
-      h('div',{className:'pc-sev',style:{background:s.dot}}),
-      h('div',{className:'pc-info'},
-        h('div',{className:'pc-name'},p.part_name),
-        h('div',{className:'pc-action'},
-          h('span',{style:{color:s.tx,fontWeight:'500'}},SLABEL[p.severity]||'Inspect'),' · ',p.action)),
-      h('div',{className:'sev-badge',style:{background:s.bg,borderColor:s.bd,color:s.tx,fontSize:'12px',padding:'3px 10px'}},
-        h('span',{className:'sev-dot',style:{background:s.dot,width:'6px',height:'6px'}}),' ',p.severity),
-      h('div',{className:'pc-chev'+(open?' open':''),innerHTML:'<svg width="16" height="16" fill="none" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
-    pc.appendChild(hd);
-    if(open){
-      const body=h('div',{className:'pc-body'},
-        h('div',{className:'pc-desc'},p.description),
-        h('div',{style:{marginTop:'12px',fontSize:'13px',color:'var(--text-tertiary)'}},
-          h('strong',{style:{color:'var(--text-secondary)'}},'Repair possible: '),p.repair_possible?'Yes':'No'));
-      pc.appendChild(body);
-    }
-    app.appendChild(pc);
+  // Uploaded photos strip
+  if(state.previews.length>0){
+    const strip=h('div',{style:{display:'flex',gap:'8px',marginBottom:'16px',overflowX:'auto',padding:'4px 0'}});
+    state.previews.forEach(p=>{
+      strip.appendChild(h('img',{src:p,style:{width:'80px',height:'60px',objectFit:'cover',borderRadius:'8px',border:'1px solid var(--border)',flexShrink:'0'}}));
+    });
+    app.appendChild(strip);
+  }
+
+  // Part cards — expanded by default, much richer
+  const catOrder=['structural','body','lighting','glass','mechanical','electrical','interior'];
+  const catLabels={structural:'Structural',body:'Body Panels',lighting:'Lighting',glass:'Glass',mechanical:'Mechanical',electrical:'Electrical',interior:'Interior'};
+  const catTag={structural:'tag-structural',body:'tag-body',lighting:'tag-lighting',glass:'tag-glass',mechanical:'tag-mechanical',electrical:'tag-electrical',interior:'tag-interior'};
+
+  const grouped={};
+  parts.forEach(p=>{const c=p.category||'body';if(!grouped[c])grouped[c]=[];grouped[c].push(p);});
+
+  let partIdx=0;
+  catOrder.forEach(cat=>{
+    if(!grouped[cat])return;
+    app.appendChild(h('div',{style:{fontSize:'12px',fontWeight:'700',color:'var(--text-tertiary)',textTransform:'uppercase',letterSpacing:'1px',margin:'24px 0 10px',padding:'0 4px'}},catLabels[cat]||cat));
+
+    grouped[cat].forEach(p=>{
+      const i=parts.indexOf(p);
+      const s=SEV[p.severity]||SEV.minor;
+      const open=state.expanded===i;
+      const pc=h('div',{className:'pc',style:{animationDelay:partIdx*60+'ms'}});
+      partIdx++;
+
+      // Header row
+      const hd=h('div',{className:'pc-h',on:{click:()=>{state.expanded=open?null:i;render();}}});
+      hd.appendChild(h('div',{className:'pc-sev',style:{background:s.dot}}));
+
+      const info=h('div',{className:'pc-info'});
+      const nameRow=h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}});
+      nameRow.appendChild(h('span',{className:'pc-name'},p.part_name));
+      nameRow.appendChild(h('span',{className:'tag '+(catTag[p.category]||'tag-body')},p.damage_type||p.category||'body'));
+      info.appendChild(nameRow);
+
+      // Confidence + action line
+      const metaRow=h('div',{style:{display:'flex',alignItems:'center',gap:'12px',marginTop:'4px'}});
+      metaRow.appendChild(h('span',{style:{color:s.tx,fontWeight:'500',fontSize:'13px'}},p.action));
+      if(p.confidence!=null){
+        const confColor=p.confidence>=80?'#10B981':p.confidence>=60?'#F59E0B':'#EF4444';
+        metaRow.appendChild(h('span',{style:{fontSize:'12px',color:'var(--text-tertiary)'}},'·'));
+        metaRow.appendChild(h('span',{style:{fontSize:'12px',color:confColor,fontWeight:'600'}},p.confidence+'% confidence'));
+      }
+      if(p.labor_hours_estimate){
+        metaRow.appendChild(h('span',{style:{fontSize:'12px',color:'var(--text-tertiary)'}},'·'));
+        metaRow.appendChild(h('span',{style:{fontSize:'12px',color:'var(--text-tertiary)'}},p.labor_hours_estimate+'h labor'));
+      }
+      info.appendChild(metaRow);
+
+      // Confidence mini bar
+      if(p.confidence!=null){
+        const confColor=p.confidence>=80?'#10B981':p.confidence>=60?'#F59E0B':'#EF4444';
+        const cb=h('div',{className:'conf-bar'});
+        cb.appendChild(h('div',{className:'conf-fill',style:{width:p.confidence+'%',background:confColor}}));
+        info.appendChild(cb);
+      }
+      hd.appendChild(info);
+
+      hd.appendChild(h('div',{className:'sev-badge',style:{background:s.bg,borderColor:s.bd,color:s.tx,fontSize:'12px',padding:'3px 10px'}},
+        h('span',{className:'sev-dot',style:{background:s.dot,width:'6px',height:'6px'}}),' ',p.severity));
+      hd.appendChild(h('div',{className:'pc-chev'+(open?' open':''),innerHTML:'<svg width="16" height="16" fill="none" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
+      pc.appendChild(hd);
+
+      if(open){
+        const body=h('div',{className:'pc-body'});
+        body.appendChild(h('div',{className:'pc-desc'},p.description));
+
+        const dg=h('div',{className:'detail-grid'});
+        const addDetail=(label,val)=>{if(val!=null&&val!=='')dg.appendChild(h('div',{className:'detail-item'},h('div',{className:'detail-label'},label),h('div',{className:'detail-value'},String(val))));};
+        addDetail('Recommended Action',p.action);
+        addDetail('Repair Difficulty',p.repair_difficulty?(p.repair_difficulty.charAt(0).toUpperCase()+p.repair_difficulty.slice(1)):null);
+        addDetail('Repair Possible',p.repair_possible?'Yes':'No');
+        addDetail('Paint Required',p.paint_required?'Yes':'No');
+        addDetail('Parts Source',p.oem_vs_aftermarket);
+        addDetail('Est. Labor',p.labor_hours_estimate?p.labor_hours_estimate+' hours':null);
+        addDetail('Damage Type',p.damage_type?(p.damage_type.charAt(0).toUpperCase()+p.damage_type.slice(1)):null);
+        addDetail('Confidence',p.confidence!=null?p.confidence+'%':null);
+        body.appendChild(dg);
+
+        if(p.hidden_damage_risk&&p.hidden_damage_risk!=='low'){
+          const hrCls='hidden-risk '+(p.hidden_damage_risk||'low');
+          const hrIcon=p.hidden_damage_risk==='high'?'\u26A0':'\u2139\uFE0F';
+          body.appendChild(h('div',{className:hrCls},
+            h('span',null,hrIcon),
+            h('div',null,
+              h('strong',null,'Hidden damage risk: '+p.hidden_damage_risk.toUpperCase()),
+              p.hidden_damage_note?h('div',{style:{marginTop:'2px',fontWeight:'400'}},' '+p.hidden_damage_note):null)));
+        }
+        pc.appendChild(body);
+      }
+      app.appendChild(pc);
+    });
   });
+
+  // Recommended next steps
+  if(r.recommended_next_steps&&r.recommended_next_steps.length>0){
+    const ns=h('div',{className:'next-steps'});
+    ns.appendChild(h('div',{style:{fontSize:'14px',fontWeight:'600',marginBottom:'12px',color:'var(--text-primary)'}},'Recommended Next Steps'));
+    r.recommended_next_steps.forEach((step,i)=>{
+      ns.appendChild(h('div',{className:'next-step-item'},
+        h('div',{className:'next-step-num'},String(i+1)),
+        h('div',null,step)));
+    });
+    app.appendChild(ns);
+  }
+
+  // Disclaimer
+  app.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'20px',padding:'12px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',lineHeight:'1.5',border:'1px solid var(--border)'}},'This assessment is generated by AI based on uploaded photos and may not capture all damage — particularly hidden structural, mechanical, or electrical issues. Always have a qualified mechanic or body shop perform an in-person inspection before making repair or purchase decisions.'));
 
   const btnRow=h('div',{className:'btn-row'});
   btnRow.appendChild(h('button',{className:'btn btn-s',on:{click:resetAll}},'Start Over'));
