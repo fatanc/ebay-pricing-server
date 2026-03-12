@@ -339,6 +339,142 @@ async def damage_price_estimate(
     }
 
 
+# ── VIN Decoder Endpoint ──────────────────────────────────────────────────────
+
+@app.get("/api/vin/{vin}")
+async def decode_vin(vin: str):
+    """Decode a VIN using the free NHTSA vPIC API."""
+    vin = vin.strip().upper()
+    if len(vin) != 17:
+        raise HTTPException(400, "VIN must be exactly 17 characters")
+
+    resp = await token_mgr.http_client.get(
+        f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise HTTPException(502, "NHTSA API error")
+
+    raw = resp.json()
+    fields = {}
+    for item in raw.get("Results", []):
+        if item.get("Value") and item["Value"].strip() and item["Value"].strip() != "Not Applicable":
+            fields[item["Variable"]] = item["Value"].strip()
+
+    # Map to clean structure
+    make = fields.get("Make", "").title()
+    model = fields.get("Model", "")
+    year = fields.get("Model Year", "")
+    trim = fields.get("Trim", "")
+    body = fields.get("Body Class", "")
+    drive = fields.get("Drive Type", "")
+    fuel = fields.get("Fuel Type - Primary", "")
+    engine = fields.get("Displacement (L)", "")
+    cylinders = fields.get("Engine Number of Cylinders", "")
+    plant_country = fields.get("Plant Country", "")
+    vehicle_type = fields.get("Vehicle Type", "")
+    gvwr = fields.get("Gross Vehicle Weight Rating From", "")
+
+    vehicle_str = f"{year} {make} {model}".strip()
+    if trim:
+        vehicle_str += f" {trim}"
+
+    return {
+        "vin": vin,
+        "vehicle": vehicle_str,
+        "year": year,
+        "make": make,
+        "model": model,
+        "trim": trim,
+        "body_class": body,
+        "drive_type": drive,
+        "fuel_type": fuel,
+        "engine": f"{engine}L {cylinders}cyl".strip("L cyl") if engine or cylinders else "",
+        "plant_country": plant_country,
+        "vehicle_type": vehicle_type,
+        "all_fields": fields,
+    }
+
+
+# ── Market Value Endpoint ─────────────────────────────────────────────────────
+
+@app.get("/api/market-value")
+async def get_market_value(
+    vehicle: str = Query(..., description="e.g. '2020 Tesla Model 3'"),
+    marketplace: Optional[str] = Query(None),
+):
+    """
+    Estimate market value by searching eBay for comparable clean-title vehicle listings.
+    Returns clean-title range + estimated salvage value.
+    """
+    token = await token_mgr.get_token()
+    mktplace = marketplace or EBAY_MARKETPLACE
+    headers = {"Authorization": f"Bearer {token}", "X-EBAY-C-MARKETPLACE-ID": mktplace}
+
+    # Search for clean title vehicles
+    clean_resp = await token_mgr.http_client.get(
+        f"{EBAY_API_BASE}/buy/browse/v1/item_summary/search",
+        headers=headers,
+        params={
+            "q": vehicle,
+            "limit": "20",
+            "category_ids": "6001",
+            "filter": "price:[3000..],conditions:{USED}",
+            "sort": "price",
+        },
+    )
+
+    clean_prices = []
+    clean_listings = []
+    if clean_resp.status_code == 200:
+        data = clean_resp.json()
+        for item in data.get("itemSummaries", []):
+            price = float(item.get("price", {}).get("value", 0))
+            if price >= 3000:
+                clean_prices.append(price)
+                clean_listings.append({
+                    "title": item.get("title", ""),
+                    "price": price,
+                    "url": item.get("itemWebUrl", ""),
+                    "image": item.get("image", {}).get("imageUrl"),
+                    "condition": item.get("condition"),
+                })
+
+    # Calculate market value ranges
+    if clean_prices:
+        clean_prices.sort()
+        # Remove outliers (top/bottom 10%)
+        trim_count = max(1, len(clean_prices) // 10)
+        trimmed = clean_prices[trim_count:-trim_count] if len(clean_prices) > 4 else clean_prices
+        avg_clean = sum(trimmed) / len(trimmed)
+        low_clean = trimmed[0]
+        high_clean = trimmed[-1]
+    else:
+        avg_clean = low_clean = high_clean = 0
+
+    # Salvage value is typically 20-40% of clean retail
+    salvage_low = round(avg_clean * 0.15, -2) if avg_clean else 0
+    salvage_avg = round(avg_clean * 0.25, -2) if avg_clean else 0
+    salvage_high = round(avg_clean * 0.40, -2) if avg_clean else 0
+
+    return {
+        "vehicle": vehicle,
+        "clean_title": {
+            "avg": round(avg_clean, 0),
+            "low": round(low_clean, 0),
+            "high": round(high_clean, 0),
+            "sample_count": len(clean_prices),
+            "listings": clean_listings[:5],
+        },
+        "salvage_estimate": {
+            "low": salvage_low,
+            "avg": salvage_avg,
+            "high": salvage_high,
+            "note": "Estimated at 15-40% of clean retail depending on damage severity",
+        },
+    }
+
+
 # ── Analyze Endpoint (proxies Anthropic vision API) ──────────────────────────
 
 class AnalyzeRequest(BaseModel):
@@ -693,7 +829,7 @@ const VEHICLES={"Acura":["ILX","Integra","MDX","NSX","RDX","RLX","TL","TLX","TSX
 
 const MAKES=Object.keys(VEHICLES).sort();
 
-let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
 
 function $(sel){return document.querySelector(sel)}
 function h(tag,attrs,...children){
@@ -845,6 +981,45 @@ function renderUpload(app){
   card2.appendChild(h('div',{className:'card-title'},
     h('span',{innerHTML:'<svg width="22" height="22" fill="none" viewBox="0 0 24 24"><path d="M5 17h1m12 0h1M3 11l2-6h14l2 6M3 11v6h18v-6M3 11h18M7.5 17a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm9 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
     ' Vehicle Information'));
+
+  // VIN decode row
+  const vinRow=h('div',{style:{display:'grid',gridTemplateColumns:'1fr auto',gap:'12px',marginBottom:'16px'}});
+  const vinGroup=h('div',{className:'fg'});
+  vinGroup.appendChild(h('label',{className:'fl'},'VIN (auto-fills vehicle details)'));
+  const vinInput=h('input',{className:'fi',placeholder:'e.g. WVWZZZ1KZAW123456',value:state.vin||'',style:{fontFamily:"'Space Mono',monospace",letterSpacing:'1px'},on:{input:e=>{state.vin=e.target.value.toUpperCase();}}});
+  vinGroup.appendChild(vinInput);
+  vinRow.appendChild(vinGroup);
+  const vinBtn=h('button',{className:'btn btn-p',style:{alignSelf:'flex-end',padding:'10px 20px'},on:{click:async()=>{
+    const v=(state.vin||'').trim();
+    if(v.length!==17){state.error='VIN must be exactly 17 characters';render();return;}
+    vinBtn.disabled=true;vinBtn.textContent='Decoding...';
+    try{
+      const r=await fetch(API+'/api/vin/'+v);
+      if(!r.ok)throw new Error('VIN decode failed');
+      const d=await r.json();
+      state.vinData=d;
+      if(d.year)state.vehicle.year=d.year;
+      if(d.make)state.vehicle.make=d.make;
+      if(d.model)state.vehicle.model=d.model;
+      if(d.trim)state.vehicle.trim=d.trim;
+      render();
+    }catch(e){state.error=e.message;render();}
+  }}},'Decode');
+  vinRow.appendChild(vinBtn);
+  card2.appendChild(vinRow);
+
+  // Show VIN decode result if available
+  if(state.vinData){
+    const vd=state.vinData;
+    const chips=h('div',{style:{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'16px'}});
+    const addChip=(label,val)=>{if(val)chips.appendChild(h('span',{className:'tag tag-body',style:{fontSize:'12px',padding:'4px 10px'}},label+': '+val));};
+    addChip('Body',vd.body_class);addChip('Drive',vd.drive_type);addChip('Fuel',vd.fuel_type);addChip('Engine',vd.engine);addChip('Origin',vd.plant_country);
+    card2.appendChild(chips);
+  }
+
+  // Divider
+  card2.appendChild(h('div',{style:{borderTop:'1px solid var(--border)',margin:'0 0 16px',paddingTop:'0'}}));
+  card2.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginBottom:'12px'}},'Or enter manually:'));
 
   const row=h('div',{className:'form-row'});
 
@@ -1090,30 +1265,121 @@ function renderPricing(app){
   if(state.pricingLoading){
     const wrap=h('div',{className:'progress'});
     wrap.appendChild(h('div',{innerHTML:'<svg width="24" height="24" viewBox="0 0 24 24" style="animation:spin 1s linear infinite"><circle cx="12" cy="12" r="10" stroke="#CBD5E1" stroke-width="3" fill="none"/><path d="M12 2a10 10 0 019.8 8" stroke="#3B82F6" stroke-width="3" stroke-linecap="round" fill="none"/></svg>'}));
-    wrap.appendChild(h('div',{className:'progress-label'},'Searching eBay for parts...'));
-    wrap.appendChild(h('div',{className:'progress-sub'},'Finding the best prices across thousands of listings'));
+    wrap.appendChild(h('div',{className:'progress-label'},'Fetching prices & market data...'));
+    wrap.appendChild(h('div',{className:'progress-sub'},'Searching eBay listings, calculating market value, comparing OEM vs aftermarket'));
     app.appendChild(wrap);return;
   }
   if(!state.pricing)return;
   const pd=state.pricing;
+  const vName=state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model;
 
+  // Header
   const hdr=h('div',{className:'rh'});
   hdr.appendChild(h('div',null,
-    h('div',{className:'rt'},'Parts & Pricing'),
-    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},
-      state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model+' · '+pd.length+' parts priced')));
+    h('div',{className:'rt'},'Repair Cost & Market Analysis'),
+    h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)',marginTop:'4px'}},vName+' · '+pd.length+' parts priced')));
   app.appendChild(hdr);
 
+  // ── Bid Decision Panel ──
+  const tPartsAvg=pd.reduce((s,p)=>s+(p.avg_price||0),0);
+  const tPartsMin=pd.reduce((s,p)=>s+(p.min_price||0),0);
+  const tPartsMax=pd.reduce((s,p)=>s+(p.max_price||0),0);
+  const tLabor=pd.reduce((s,p)=>s+(p.labor_hours||0),0);
+  const laborRate=75;
+  const laborCost=tLabor*laborRate;
+  const paintParts=pd.filter(p=>p.paint).length;
+  const paintCost=paintParts*350;
+  const totalRepairLow=tPartsMin+laborCost*0.8+paintCost*0.7;
+  const totalRepairAvg=tPartsAvg+laborCost+paintCost;
+  const totalRepairHigh=tPartsMax+laborCost*1.3+paintCost*1.3;
+
+  const mv=state.marketValue;
+  const cleanAvg=mv?.clean_title?.avg||0;
+  const salvageAvg=mv?.salvage_estimate?.avg||0;
+
+  // Decision card
+  const decision=h('div',{className:'card',style:{borderWidth:'2px',borderColor:cleanAvg&&totalRepairAvg>cleanAvg*0.75?'var(--danger)':cleanAvg&&totalRepairAvg>cleanAvg*0.5?'var(--warning)':'var(--success)'}});
+  const decTitle=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'20px'}});
+  decTitle.appendChild(h('div',{className:'card-title',style:{margin:0}},'Bid Decision Summary'));
+
+  if(cleanAvg>0){
+    const ratio=totalRepairAvg/cleanAvg;
+    const verdict=ratio>0.75?'LIKELY TOTAL LOSS':ratio>0.5?'MARGINAL — HIGH RISK':'REPAIR VIABLE';
+    const vColor=ratio>0.75?'var(--danger)':ratio>0.5?'var(--warning)':'var(--success)';
+    decTitle.appendChild(h('div',{className:'sev-badge',style:{background:ratio>0.75?'#FEE2E2':ratio>0.5?'#FEF3C7':'#ECFDF5',borderColor:vColor,color:vColor,fontWeight:'700'}},verdict));
+  }
+  decision.appendChild(decTitle);
+
+  // Numbers grid
+  const numGrid=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'16px'}});
+
+  // Market value column
+  const mvCol=h('div',{style:{padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-sm)'}});
+  mvCol.appendChild(h('div',{className:'stat-l',style:{marginBottom:'8px'}},'CLEAN TITLE VALUE'));
+  if(cleanAvg>0){
+    mvCol.appendChild(h('div',{className:'stat-v',style:{color:'var(--accent)',fontSize:'26px'}},'$'+cleanAvg.toLocaleString(undefined,{maximumFractionDigits:0})));
+    mvCol.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'4px'}},'$'+mv.clean_title.low.toLocaleString(undefined,{maximumFractionDigits:0})+' – $'+mv.clean_title.high.toLocaleString(undefined,{maximumFractionDigits:0})));
+    mvCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'2px'}},mv.clean_title.sample_count+' comparable listings'));
+  }else{
+    mvCol.appendChild(h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)'}},'No data found'));
+  }
+  numGrid.appendChild(mvCol);
+
+  // Repair cost column
+  const repCol=h('div',{style:{padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-sm)'}});
+  repCol.appendChild(h('div',{className:'stat-l',style:{marginBottom:'8px'}},'ESTIMATED REPAIR COST'));
+  repCol.appendChild(h('div',{className:'stat-v',style:{color:'var(--danger)',fontSize:'26px'}},'$'+totalRepairAvg.toLocaleString(undefined,{maximumFractionDigits:0})));
+  repCol.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'4px'}},'$'+totalRepairLow.toLocaleString(undefined,{maximumFractionDigits:0})+' – $'+totalRepairHigh.toLocaleString(undefined,{maximumFractionDigits:0})));
+  repCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'2px'}},'Parts + labor + paint'));
+  numGrid.appendChild(repCol);
+
+  // Max bid column
+  const bidCol=h('div',{style:{padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-sm)'}});
+  bidCol.appendChild(h('div',{className:'stat-l',style:{marginBottom:'8px'}},'SUGGESTED MAX BID'));
+  if(cleanAvg>0){
+    const maxBid=Math.max(0,cleanAvg-totalRepairAvg)*0.85;
+    bidCol.appendChild(h('div',{className:'stat-v',style:{color:maxBid>0?'var(--success)':'var(--danger)',fontSize:'26px'}},maxBid>0?'$'+maxBid.toLocaleString(undefined,{maximumFractionDigits:0}):'$0'));
+    bidCol.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'4px'}},'(Market − Repair) × 85%'));
+    bidCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'2px'}},'15% profit margin built in'));
+  }else{
+    bidCol.appendChild(h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)'}},'Need market value'));
+  }
+  numGrid.appendChild(bidCol);
+  decision.appendChild(numGrid);
+
+  // Cost breakdown
+  const bd=h('div',{style:{marginTop:'16px',padding:'14px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',fontSize:'13px',color:'var(--text-secondary)'}});
+  bd.appendChild(h('div',{style:{fontWeight:'600',marginBottom:'8px',color:'var(--text-primary)'}},'Cost Breakdown'));
+  const addRow=(l,v,note)=>{const row=h('div',{style:{display:'flex',justifyContent:'space-between',padding:'4px 0'}});row.appendChild(h('span',null,l));const rr=h('span',{style:{fontFamily:"'Space Mono',monospace",fontWeight:'600'}},v);if(note){row.appendChild(h('span',null,rr,' ',h('span',{style:{fontWeight:'400',color:'var(--text-tertiary)',fontSize:'11px'}},note)));}else{row.appendChild(rr);}bd.appendChild(row);};
+  addRow('Parts (avg)',  '$'+tPartsAvg.toLocaleString(undefined,{maximumFractionDigits:0}),'('+pd.length+' parts)');
+  addRow('Labor',        '$'+laborCost.toLocaleString(undefined,{maximumFractionDigits:0}),'('+tLabor.toFixed(1)+'h × $'+laborRate+'/hr)');
+  if(paintParts>0)addRow('Paint & blend','$'+paintCost.toLocaleString(undefined,{maximumFractionDigits:0}),'('+paintParts+' panels)');
+  bd.appendChild(h('div',{style:{borderTop:'1px solid var(--border)',margin:'6px 0'}}));
+  addRow('Total estimate','$'+totalRepairAvg.toLocaleString(undefined,{maximumFractionDigits:0}));
+  decision.appendChild(bd);
+
+  app.appendChild(decision);
+
+  // ── Parts pricing cards ──
+  app.appendChild(h('div',{style:{fontSize:'12px',fontWeight:'700',color:'var(--text-tertiary)',textTransform:'uppercase',letterSpacing:'1px',margin:'28px 0 12px',padding:'0 4px'}},'Parts Pricing'));
+
   pd.forEach((d,idx)=>{
-    const card=h('div',{className:'pr-card',style:{animationDelay:idx*100+'ms'}});
+    const card=h('div',{className:'pr-card',style:{animationDelay:idx*80+'ms'}});
     const head=h('div',{className:'pr-head'});
-    head.appendChild(h('div',null,
-      h('div',{className:'pr-name'},d.part),
-      h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'2px'}},(d.total||0).toLocaleString()+' listings found')));
-    const right=h('div',{style:{textAlign:'right'}});
-    right.appendChild(h('div',{className:'pr-avg'},d.avg_price?'$'+d.avg_price.toFixed(0):'N/A'));
-    if(d.min_price)right.appendChild(h('div',{className:'pr-range'},'$'+d.min_price.toFixed(0)+' – $'+d.max_price.toFixed(0)));
-    head.appendChild(right);
+    const headLeft=h('div',null);
+    const nameRow=h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}});
+    nameRow.appendChild(h('span',{className:'pr-name'},d.part));
+    if(d.oem_rec)nameRow.appendChild(h('span',{className:'tag '+(d.oem_rec.includes('OEM')?'tag-structural':'tag-body'),style:{fontSize:'10px'}},d.oem_rec));
+    headLeft.appendChild(nameRow);
+    headLeft.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'2px'}},(d.total||0).toLocaleString()+' listings'));
+    head.appendChild(headLeft);
+
+    // Price comparison: aftermarket vs OEM
+    const headRight=h('div',{style:{textAlign:'right'}});
+    headRight.appendChild(h('div',{className:'pr-avg'},d.avg_price?'$'+d.avg_price.toFixed(0):'N/A'));
+    if(d.min_price)headRight.appendChild(h('div',{className:'pr-range'},'$'+d.min_price.toFixed(0)+' – $'+d.max_price.toFixed(0)));
+    if(d.oem_avg)headRight.appendChild(h('div',{style:{fontSize:'11px',color:'#7C3AED',marginTop:'2px'}},'OEM avg: $'+d.oem_avg.toFixed(0)));
+    head.appendChild(headRight);
     card.appendChild(head);
 
     if(d.results&&d.results.length>0){
@@ -1127,6 +1393,7 @@ function renderPricing(app){
         const meta=h('div',{className:'li-meta'});
         meta.appendChild(h('span',{className:'li-price'},'$'+(li.price||0).toFixed(2)));
         if(li.condition)meta.appendChild(h('span',{className:'li-cond'},li.condition));
+        if(li.shipping_cost!=null&&li.shipping_cost>0)meta.appendChild(h('span',{style:{fontSize:'11px',color:'var(--text-tertiary)'}},'+ $'+li.shipping_cost.toFixed(0)+' ship'));
         info.appendChild(meta);
         a.appendChild(info);
         a.appendChild(h('div',{style:{color:'var(--text-tertiary)',flexShrink:0,alignSelf:'center'},innerHTML:'<svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
@@ -1137,15 +1404,24 @@ function renderPricing(app){
     app.appendChild(card);
   });
 
-  const tAvg=pd.reduce((s,p)=>s+(p.avg_price||0),0);
-  const tMin=pd.reduce((s,p)=>s+(p.min_price||0),0);
-  const tMax=pd.reduce((s,p)=>s+(p.max_price||0),0);
-  const total=h('div',{className:'total-bar'});
-  total.appendChild(h('div',null,h('div',{style:{fontSize:'16px',fontWeight:'600',color:'var(--text-secondary)'}},'Estimated Total Parts Cost')));
-  total.appendChild(h('div',null,
-    h('div',{className:'total-v'},'$'+tAvg.toFixed(0)),
-    h('div',{className:'total-r'},'$'+tMin.toFixed(0)+' – $'+tMax.toFixed(0)+' range')));
-  app.appendChild(total);
+  // Comparable vehicles section
+  if(mv&&mv.clean_title&&mv.clean_title.listings&&mv.clean_title.listings.length>0){
+    app.appendChild(h('div',{style:{fontSize:'12px',fontWeight:'700',color:'var(--text-tertiary)',textTransform:'uppercase',letterSpacing:'1px',margin:'28px 0 12px',padding:'0 4px'}},'Comparable Vehicle Listings (Clean Title)'));
+    const compCard=h('div',{className:'pr-card'});
+    const compGrid=h('div',{className:'lg'});
+    mv.clean_title.listings.forEach(li=>{
+      const a=h('a',{className:'li',href:li.url,target:'_blank',rel:'noopener noreferrer'});
+      if(li.image)a.appendChild(h('img',{className:'li-img',src:li.image,alt:''}));
+      const info=h('div',{className:'li-info'});
+      info.appendChild(h('div',{className:'li-title'},li.title));
+      info.appendChild(h('div',{className:'li-meta'},h('span',{className:'li-price'},'$'+li.price.toLocaleString(undefined,{maximumFractionDigits:0})),li.condition?h('span',{className:'li-cond'},li.condition):null));
+      a.appendChild(info);
+      a.appendChild(h('div',{style:{color:'var(--text-tertiary)',flexShrink:0,alignSelf:'center'},innerHTML:'<svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}));
+      compGrid.appendChild(a);
+    });
+    compCard.appendChild(compGrid);
+    app.appendChild(compCard);
+  }
 
   const btnRow=h('div',{className:'btn-row'});
   btnRow.appendChild(h('button',{className:'btn btn-s',on:{click:()=>{state.step='results';render();}}},'← Back to Assessment'));
@@ -1205,23 +1481,33 @@ async function fetchPricing(){
   try{
     const vehicleStr=state.vehicle.year+' '+state.vehicle.make+' '+state.vehicle.model;
     const parts=state.result.damaged_parts.filter(p=>p.severity==='critical'||p.severity==='major'||p.action==='Replace');
+
+    // Fetch market value in parallel with parts pricing
+    const mvPromise=fetch(API+'/api/market-value?'+new URLSearchParams({vehicle:vehicleStr})).then(r=>r.ok?r.json():null).catch(()=>null);
+
     const results=await Promise.all(parts.map(async p=>{
       try{
         const q=p.ebay_query||vehicleStr+' '+p.part_name;
+        // Search for used/aftermarket (best value)
         const r=await fetch(API+'/api/search?'+new URLSearchParams({q,limit:'6'}));
         if(!r.ok)throw new Error();
         const d=await r.json();
-        return{part:p.part_name,severity:p.severity,query:q,...d};
-      }catch{return{part:p.part_name,severity:p.severity,total:0,results:[],avg_price:null,min_price:null,max_price:null};}
+        // Also search for OEM/new
+        const oemQ=q+' OEM genuine';
+        const r2=await fetch(API+'/api/search?'+new URLSearchParams({q:oemQ,limit:'3',min_price:'20'}));
+        const oemData=r2.ok?await r2.json():{results:[],avg_price:null};
+        return{part:p.part_name,severity:p.severity,action:p.action,oem_rec:p.oem_vs_aftermarket,labor_hours:p.labor_hours_estimate,paint:p.paint_required,query:q,...d,oem_results:oemData.results||[],oem_avg:oemData.avg_price};
+      }catch{return{part:p.part_name,severity:p.severity,total:0,results:[],avg_price:null,min_price:null,max_price:null,oem_results:[],oem_avg:null};}
     }));
     state.pricing=results;
+    state.marketValue=await mvPromise;
   }catch{state.error='Failed to fetch pricing';}
   finally{state.pricingLoading=false;render();}
 }
 
 function resetAll(){
   clearInterval(state.progressTimer);
-  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
   render();
 }
 
