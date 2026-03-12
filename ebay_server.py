@@ -339,6 +339,208 @@ async def damage_price_estimate(
     }
 
 
+# ── Auction URL Fetch Endpoint ────────────────────────────────────────────────
+
+@app.get("/api/fetch-lot")
+async def fetch_lot(url: str = Query(..., description="Auction listing URL")):
+    """
+    Fetch and extract vehicle data from any auction listing URL.
+    Tier 1: Native JSON extraction for AutoBidMaster (richest data).
+    Tier 2: AI-powered HTML parsing for any other auction site.
+    """
+    import json as json_mod
+    import re
+
+    url = url.strip()
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    headers_fetch = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cookie": "screenSize=1920x1080",
+    }
+
+    # ── Tier 1: AutoBidMaster native extraction ──
+    if "autobidmaster.com" in url:
+        # Ensure fallback=true for SSR content
+        fetch_url = url if "fallback=true" in url else url.rstrip("/") + "/?fallback=true"
+        try:
+            resp = await token_mgr.http_client.get(fetch_url, headers=headers_fetch, follow_redirects=True, timeout=20)
+            if resp.status_code != 200:
+                raise HTTPException(502, f"Could not fetch page: HTTP {resp.status_code}")
+
+            text = resp.text
+            # Extract __REACT_QUERY_STATE__
+            scripts = re.findall(r'<script[^>]*>(.*?)</script>', text, re.DOTALL)
+            lot = None
+            for script in scripts:
+                m = re.search(r'window\.__REACT_QUERY_STATE__\s*=\s*(\{)', script)
+                if not m:
+                    continue
+                start = m.start(1)
+                depth = 0
+                end = start
+                for j in range(start, len(script)):
+                    if script[j] == '{': depth += 1
+                    elif script[j] == '}': depth -= 1
+                    if depth == 0:
+                        end = j + 1
+                        break
+                try:
+                    state = json_mod.loads(script[start:end])
+                    for q in state.get("queries", []):
+                        qdata = q.get("state", {}).get("data", {})
+                        if isinstance(qdata, dict) and "lot" in qdata:
+                            lot = qdata["lot"]
+                            break
+                except json_mod.JSONDecodeError:
+                    continue
+                if lot:
+                    break
+
+            if not lot:
+                raise HTTPException(422, "Could not extract lot data from AutoBidMaster page")
+
+            # Extract images (full resolution)
+            images = []
+            for img in lot.get("images", []):
+                img_url = img.get("hdr") or img.get("full") or img.get("thumbnail")
+                if img_url:
+                    images.append({"url": img_url, "label": img.get("label")})
+
+            # Extract title info
+            title_info = lot.get("title", {})
+            title_name = title_info.get("name", "") if isinstance(title_info, dict) else str(title_info)
+
+            return {
+                "source": "autobidmaster",
+                "source_url": url,
+                "extraction_method": "native_json",
+                "vehicle": {
+                    "year": lot.get("year"),
+                    "make": lot.get("make", ""),
+                    "model": lot.get("model", ""),
+                    "description": lot.get("description", ""),
+                    "vin": lot.get("vin", ""),
+                    "color": lot.get("color", ""),
+                    "engine": lot.get("engineSize", ""),
+                    "cylinders": lot.get("cylinders"),
+                    "drive": lot.get("drive", ""),
+                    "transmission": lot.get("transmission", ""),
+                    "fuel": lot.get("fuel", ""),
+                    "body_style": lot.get("bodyStyle", ""),
+                    "odometer": lot.get("odometer"),
+                    "odometer_type": lot.get("odometerType", "mi"),
+                    "odometer_brand": lot.get("odometerBrand", ""),
+                },
+                "auction": {
+                    "platform": lot.get("inventoryAuction", ""),
+                    "lot_number": lot.get("lotNumber"),
+                    "current_bid": lot.get("currentBid") or lot.get("highBid"),
+                    "buy_now": lot.get("buyItNow"),
+                    "suggested_bid": lot.get("suggestedBid"),
+                    "starting_bid": lot.get("startingBid"),
+                    "currency": lot.get("currency", "USD"),
+                    "sale_date": lot.get("saleDate"),
+                    "sale_status": lot.get("saleStatusString", ""),
+                    "sold": lot.get("sold", False),
+                    "location": lot.get("locationName", ""),
+                    "location_state": lot.get("locationState", ""),
+                },
+                "condition": {
+                    "primary_damage": lot.get("primaryDamage", ""),
+                    "secondary_damage": lot.get("secondaryDamage", ""),
+                    "title_type": title_name,
+                    "title_state": lot.get("titleState", ""),
+                    "run_drives": lot.get("runDrives", ""),
+                    "driveable": lot.get("drivable"),
+                    "keys": lot.get("keysStatus", ""),
+                    "airbag_status": lot.get("airbagStatus", ""),
+                    "engine_missing": lot.get("engineMissing", False),
+                    "transmission_missing": lot.get("transmissionMissing", False),
+                },
+                "valuation": {
+                    "acv": float(lot["acv"]) if lot.get("acv") else None,
+                    "repair_cost": float(lot["repairCost"]) if lot.get("repairCost") else None,
+                },
+                "images": images,
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"AutoBidMaster extraction failed: {e}")
+            raise HTTPException(500, f"Failed to parse AutoBidMaster page: {str(e)}")
+
+    # ── Tier 2: AI-powered extraction for any other URL ──
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(500, "Anthropic API key not configured — needed for non-AutoBidMaster URLs")
+
+    try:
+        resp = await token_mgr.http_client.get(url, headers=headers_fetch, follow_redirects=True, timeout=20)
+        if resp.status_code != 200:
+            raise HTTPException(502, f"Could not fetch page: HTTP {resp.status_code}")
+
+        html = resp.text
+        if len(html) < 500:
+            raise HTTPException(422, "Page returned too little content — may require JavaScript or login")
+
+        # Truncate HTML to fit in context (keep first 30k chars, should include all vehicle data)
+        html_truncated = html[:30000]
+
+        # Use Claude to extract structured data
+        extract_prompt = """Extract vehicle auction listing data from this HTML page. 
+Return ONLY valid JSON (no markdown, no backticks):
+{
+  "vehicle": {"year": 2020, "make": "Toyota", "model": "Camry", "description": "full title/description", "vin": "if found", "color": "", "engine": "", "drive": "", "transmission": "", "fuel": "", "odometer": null},
+  "auction": {"platform": "site name", "lot_number": null, "current_bid": null, "buy_now": null, "sale_date": "", "sale_status": "", "location": ""},
+  "condition": {"primary_damage": "", "secondary_damage": "", "title_type": "", "run_drives": "", "driveable": null, "keys": ""},
+  "valuation": {"acv": null, "repair_cost": null},
+  "images": [{"url": "full image URL", "label": null}]
+}
+Extract ALL image URLs that show the vehicle (full/high resolution preferred over thumbnails).
+If a field is not found, use null or empty string. Extract prices as numbers without $ or commas."""
+
+        ai_resp = await token_mgr.http_client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": f"{extract_prompt}\n\nHTML:\n{html_truncated}"}],
+            },
+            timeout=60,
+        )
+
+        if ai_resp.status_code != 200:
+            err = ai_resp.json().get("error", {}).get("message", "AI extraction failed")
+            raise HTTPException(502, err)
+
+        ai_text = "".join(c.get("text", "") for c in ai_resp.json().get("content", []))
+        cleaned = ai_text.replace("```json", "").replace("```", "").strip()
+        # Fix trailing commas
+        cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+
+        try:
+            result = json_mod.loads(cleaned)
+        except json_mod.JSONDecodeError:
+            raise HTTPException(422, "Could not parse extracted data")
+
+        result["source"] = re.sub(r'https?://(?:www\.)?([^/]+).*', r'\1', url)
+        result["source_url"] = url
+        result["extraction_method"] = "ai_parsed"
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"AI lot extraction failed: {e}")
+        raise HTTPException(500, f"Failed to extract data: {str(e)}")
+
+
 # ── VIN Decoder Endpoint ──────────────────────────────────────────────────────
 
 @app.get("/api/vin/{vin}")
@@ -829,7 +1031,7 @@ const VEHICLES={"Acura":["ILX","Integra","MDX","NSX","RDX","RLX","TL","TLX","TSX
 
 const MAKES=Object.keys(VEHICLES).sort();
 
-let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',lotUrl:'',lotData:null,lotImagesLoaded:false,auctionData:null,lotValuation:null,result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
 
 function $(sel){return document.querySelector(sel)}
 function h(tag,attrs,...children){
@@ -943,6 +1145,124 @@ function renderError(){
 }
 
 function renderUpload(app){
+  // Auction URL card
+  const card0=h('div',{className:'card'});
+  card0.appendChild(h('div',{className:'card-title'},
+    h('span',{innerHTML:'<svg width="18" height="18" fill="none" viewBox="0 0 24 24"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
+    ' Import from Auction URL ',
+    h('span',{className:'badge',style:{background:'#ECFDF5',color:'#059669'}},'Quick start')));
+
+  const urlRow=h('div',{style:{display:'grid',gridTemplateColumns:'1fr auto',gap:'12px'}});
+  const urlGroup=h('div',{className:'fg'});
+  const urlInput=h('input',{className:'fi',placeholder:'Paste Copart, IAAI, AutoBidMaster, or any auction URL...',value:state.lotUrl||'',style:{fontSize:'13px'},on:{input:e=>{state.lotUrl=e.target.value;}}});
+  urlGroup.appendChild(urlInput);
+  urlRow.appendChild(urlGroup);
+
+  const urlBtn=h('button',{className:'btn btn-p',style:{alignSelf:'flex-end',padding:'10px 20px',whiteSpace:'nowrap'},on:{click:async()=>{
+    const u=(state.lotUrl||'').trim();
+    if(!u){state.error='Please paste an auction URL';render();return;}
+    urlBtn.disabled=true;urlBtn.innerHTML='<span style="display:inline-flex;align-items:center;gap:6px"><svg width="16" height="16" viewBox="0 0 24 24" style="animation:spin 1s linear infinite"><circle cx="12" cy="12" r="10" stroke="#fff" stroke-width="3" fill="none" opacity=".3"/><path d="M12 2a10 10 0 019.8 8" stroke="#fff" stroke-width="3" stroke-linecap="round" fill="none"/></svg> Fetching...</span>';
+    try{
+      const r=await fetch(API+'/api/fetch-lot?'+new URLSearchParams({url:u}));
+      if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||'Failed to fetch lot');}
+      const d=await r.json();
+      state.lotData=d;
+      // Auto-fill vehicle fields
+      const v=d.vehicle||{};
+      if(v.year)state.vehicle.year=String(v.year);
+      if(v.make)state.vehicle.make=v.make;
+      if(v.model)state.vehicle.model=v.model;
+      if(v.description)state.vehicle.trim=v.description.replace(v.year+' '+v.make+' '+v.model,'').trim();
+      if(v.odometer)state.mileage=String(v.odometer);
+      if(v.vin)state.vin=v.vin;
+      // Build notes from condition data
+      const c=d.condition||{};
+      const noteParts=[];
+      if(c.primary_damage)noteParts.push('Primary damage: '+c.primary_damage);
+      if(c.secondary_damage)noteParts.push('Secondary: '+c.secondary_damage);
+      if(c.run_drives)noteParts.push(c.run_drives);
+      if(c.title_type)noteParts.push('Title: '+c.title_type);
+      if(c.keys)noteParts.push('Keys: '+c.keys);
+      if(noteParts.length)state.notes=noteParts.join(' · ');
+      // Store auction data for later
+      state.auctionData=d.auction||{};
+      state.lotValuation=d.valuation||{};
+      render();
+    }catch(e){state.error=e.message;render();}
+  }}},'Import');
+  urlRow.appendChild(urlBtn);
+  card0.appendChild(urlRow);
+
+  // Show lot data summary if imported
+  if(state.lotData){
+    const ld=state.lotData;
+    const v=ld.vehicle||{};
+    const a=ld.auction||{};
+    const c=ld.condition||{};
+    const val=ld.valuation||{};
+    const summary=h('div',{style:{marginTop:'16px',padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-md)',border:'1px solid var(--border)'}});
+
+    const row1=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}});
+    row1.appendChild(h('div',null,
+      h('div',{style:{fontWeight:'600',fontSize:'15px'}},v.description||(v.year+' '+v.make+' '+v.model)),
+      h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'2px'}},
+        [a.platform,a.lot_number?'Lot #'+a.lot_number:'',a.location].filter(Boolean).join(' · '))));
+    row1.appendChild(h('span',{className:'tag '+(ld.extraction_method==='native_json'?'tag-body':'tag-electrical'),style:{fontSize:'11px'}},
+      ld.source||'unknown'));
+    summary.appendChild(row1);
+
+    const chips=h('div',{style:{display:'flex',flexWrap:'wrap',gap:'6px',marginTop:'8px'}});
+    if(a.current_bid)chips.appendChild(h('span',{className:'tag tag-body'},'Bid: $'+Number(a.current_bid).toLocaleString()));
+    if(a.buy_now)chips.appendChild(h('span',{className:'tag tag-lighting'},'Buy Now: $'+Number(a.buy_now).toLocaleString()));
+    if(val.acv)chips.appendChild(h('span',{className:'tag tag-body',style:{background:'#ECFDF5',color:'#059669'}},'ACV: $'+Number(val.acv).toLocaleString()));
+    if(c.primary_damage)chips.appendChild(h('span',{className:'tag tag-structural'},c.primary_damage));
+    if(c.run_drives)chips.appendChild(h('span',{className:'tag '+(c.run_drives.toLowerCase().includes('run')?'tag-body':'tag-structural')},c.run_drives));
+    if(c.keys)chips.appendChild(h('span',{className:'tag tag-lighting'},'Keys: '+c.keys));
+    if(v.odometer)chips.appendChild(h('span',{className:'tag tag-electrical'},Number(v.odometer).toLocaleString()+' mi'));
+    summary.appendChild(chips);
+
+    // Show images from lot with option to use them
+    const lotImgs=ld.images||[];
+    if(lotImgs.length>0){
+      const imgSection=h('div',{style:{marginTop:'12px'}});
+      imgSection.appendChild(h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}},
+        h('span',{style:{fontSize:'12px',fontWeight:'600',color:'var(--text-secondary)'}},lotImgs.length+' auction photos'),
+        state.lotImagesLoaded?h('span',{className:'tag tag-body'},'✓ Loaded'):
+        h('button',{className:'btn btn-p',style:{padding:'6px 14px',fontSize:'12px'},on:{click:async()=>{
+          // Download images and convert to blobs for the analyzer
+          imgSection.querySelector('button').textContent='Loading photos...';
+          imgSection.querySelector('button').disabled=true;
+          const loaded=[];
+          const previews=[];
+          for(const img of lotImgs.slice(0,8)){
+            try{
+              const r=await fetch(img.url);
+              if(!r.ok)continue;
+              const blob=await r.blob();
+              const file=new File([blob],'lot_'+(loaded.length+1)+'.jpg',{type:blob.type||'image/jpeg'});
+              loaded.push(file);
+              previews.push(URL.createObjectURL(blob));
+            }catch{}
+          }
+          state.images=loaded;
+          state.previews=previews;
+          state.lotImagesLoaded=true;
+          render();
+        }}},'Use These Photos')));
+
+      const strip=h('div',{style:{display:'flex',gap:'6px',overflowX:'auto',padding:'2px 0'}});
+      lotImgs.slice(0,10).forEach(img=>{
+        strip.appendChild(h('img',{src:img.url,style:{width:'72px',height:'54px',objectFit:'cover',borderRadius:'6px',border:'1px solid var(--border)',flexShrink:'0'},loading:'lazy'}));
+      });
+      imgSection.appendChild(strip);
+      summary.appendChild(imgSection);
+    }
+    card0.appendChild(summary);
+  }
+
+  card0.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'12px'}},'Supports AutoBidMaster, Copart (via ABM), IAAI, and most auction sites'));
+  app.appendChild(card0);
+
   // Photos card
   const card1=h('div',{className:'card'});
   card1.appendChild(h('div',{className:'card-title'},
@@ -1294,8 +1614,11 @@ function renderPricing(app){
   const totalRepairHigh=tPartsMax+laborCost*1.3+paintCost*1.3;
 
   const mv=state.marketValue;
-  const cleanAvg=mv?.clean_title?.avg||0;
+  const acvFromLot=state.lotValuation?.acv;
+  const cleanAvg=acvFromLot||mv?.clean_title?.avg||0;
+  const cleanSource=acvFromLot?'Auction ACV':'eBay comps';
   const salvageAvg=mv?.salvage_estimate?.avg||0;
+  const auc=state.auctionData||{};
 
   // Decision card
   const decision=h('div',{className:'card',style:{borderWidth:'2px',borderColor:cleanAvg&&totalRepairAvg>cleanAvg*0.75?'var(--danger)':cleanAvg&&totalRepairAvg>cleanAvg*0.5?'var(--warning)':'var(--success)'}});
@@ -1318,8 +1641,8 @@ function renderPricing(app){
   mvCol.appendChild(h('div',{className:'stat-l',style:{marginBottom:'8px'}},'CLEAN TITLE VALUE'));
   if(cleanAvg>0){
     mvCol.appendChild(h('div',{className:'stat-v',style:{color:'var(--accent)',fontSize:'26px'}},'$'+cleanAvg.toLocaleString(undefined,{maximumFractionDigits:0})));
-    mvCol.appendChild(h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'4px'}},'$'+mv.clean_title.low.toLocaleString(undefined,{maximumFractionDigits:0})+' – $'+mv.clean_title.high.toLocaleString(undefined,{maximumFractionDigits:0})));
-    mvCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'2px'}},mv.clean_title.sample_count+' comparable listings'));
+    mvCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)',marginTop:'4px'}},'Source: '+cleanSource));
+    if(!acvFromLot&&mv?.clean_title)mvCol.appendChild(h('div',{style:{fontSize:'11px',color:'var(--text-tertiary)'}},'$'+mv.clean_title.low.toLocaleString(undefined,{maximumFractionDigits:0})+' – $'+mv.clean_title.high.toLocaleString(undefined,{maximumFractionDigits:0})+' range'));
   }else{
     mvCol.appendChild(h('div',{style:{fontSize:'14px',color:'var(--text-tertiary)'}},'No data found'));
   }
@@ -1346,6 +1669,24 @@ function renderPricing(app){
   }
   numGrid.appendChild(bidCol);
   decision.appendChild(numGrid);
+
+  // Auction context
+  if(auc.current_bid||auc.buy_now){
+    const aucBar=h('div',{style:{display:'flex',gap:'12px',marginTop:'16px',flexWrap:'wrap'}});
+    if(auc.current_bid)aucBar.appendChild(h('div',{style:{padding:'10px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',flex:1,minWidth:'140px'}},
+      h('div',{className:'stat-l'},'CURRENT BID'),
+      h('div',{style:{fontFamily:"'Space Mono',monospace",fontSize:'18px',fontWeight:'700',color:'var(--warning)',marginTop:'4px'}},'$'+Number(auc.current_bid).toLocaleString())));
+    if(auc.buy_now)aucBar.appendChild(h('div',{style:{padding:'10px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',flex:1,minWidth:'140px'}},
+      h('div',{className:'stat-l'},'BUY NOW'),
+      h('div',{style:{fontFamily:"'Space Mono',monospace",fontSize:'18px',fontWeight:'700',color:'#7C3AED',marginTop:'4px'}},'$'+Number(auc.buy_now).toLocaleString())));
+    if(auc.sale_date)aucBar.appendChild(h('div',{style:{padding:'10px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',flex:1,minWidth:'140px'}},
+      h('div',{className:'stat-l'},'SALE DATE'),
+      h('div',{style:{fontSize:'14px',fontWeight:'600',marginTop:'4px'}},new Date(auc.sale_date).toLocaleDateString())));
+    if(auc.sale_status)aucBar.appendChild(h('div',{style:{padding:'10px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',flex:1,minWidth:'140px'}},
+      h('div',{className:'stat-l'},'STATUS'),
+      h('div',{style:{fontSize:'14px',fontWeight:'600',marginTop:'4px'}},auc.sale_status)));
+    decision.appendChild(aucBar);
+  }
 
   // Cost breakdown
   const bd=h('div',{style:{marginTop:'16px',padding:'14px 16px',background:'var(--bg)',borderRadius:'var(--radius-sm)',fontSize:'13px',color:'var(--text-secondary)'}});
@@ -1507,7 +1848,7 @@ async function fetchPricing(){
 
 function resetAll(){
   clearInterval(state.progressTimer);
-  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},vin:'',vinData:null,mileage:'',notes:'',lotUrl:'',lotData:null,lotImagesLoaded:false,auctionData:null,lotValuation:null,result:null,pricing:null,marketValue:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
   render();
 }
 
