@@ -366,19 +366,15 @@ async def fetch_lot(url: str = Query(..., description="Auction listing URL")):
     copart_lot = None
     if "copart.com" in url:
         import re as _re
-        m = _re.search(r'/lot/(\d+)', url)
+        # Try various Copart URL patterns
+        m = _re.search(r'/lot/(\d+)', url) or _re.search(r'/lotDetail/(\d+)', url) or _re.search(r'[/=](\d{7,9})\b', url)
         if m:
             copart_lot = m.group(1)
-        else:
-            # Try extracting lot number from the end of URL
-            m = _re.search(r'(\d{7,9})', url)
-            if m:
-                copart_lot = m.group(1)
         if copart_lot:
             url = f"https://www.autobidmaster.com/en/search/lot/{copart_lot}/"
             logger.info(f"Redirecting Copart lot {copart_lot} through AutoBidMaster")
         else:
-            raise HTTPException(400, "Could not extract lot number from Copart URL. Please use the full lot URL (e.g. copart.com/lot/12345678)")
+            raise HTTPException(400, "Could not extract lot number from Copart URL. Expected format: copart.com/lot/12345678")
 
     if "iaai.com" in url:
         import re as _re
@@ -427,7 +423,11 @@ async def fetch_lot(url: str = Query(..., description="Auction listing URL")):
                     break
 
             if not lot:
-                raise HTTPException(422, "Could not extract lot data from AutoBidMaster page")
+                # Lot not found on AutoBidMaster — could be expired, sold, or wrong lot number
+                # If this was a Copart redirect, give a specific message
+                if copart_lot:
+                    raise HTTPException(404, f"Lot #{copart_lot} was not found on AutoBidMaster. The lot may have been sold, expired, or the number might be incorrect. Try pasting the full AutoBidMaster URL instead.")
+                raise HTTPException(404, "This lot was not found on AutoBidMaster. It may have been sold or expired. Try a different listing URL.")
 
             # Extract images (full resolution)
             images = []
