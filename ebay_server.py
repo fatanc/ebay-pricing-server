@@ -425,10 +425,10 @@ Important guidelines:
             },
             json={
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 2000,
+                "max_tokens": 4096,
                 "messages": [{"role": "user", "content": content}],
             },
-            timeout=60,
+            timeout=90,
         )
 
         if resp.status_code != 200:
@@ -441,9 +441,91 @@ Important guidelines:
         text = "".join(c.get("text", "") for c in data.get("content", []))
         cleaned = text.replace("```json", "").replace("```", "").strip()
 
-        import json
-        result = json.loads(cleaned)
-        return result
+        import json, re
+
+        # Try parsing directly first
+        try:
+            result = json.loads(cleaned)
+            return result
+        except json.JSONDecodeError:
+            pass
+
+        # JSON repair: common issues from LLM output
+        repaired = cleaned
+
+        # Fix trailing commas before } or ]
+        repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+
+        # Fix unescaped quotes inside string values
+        # This handles cases like "description": "The "bumper" is cracked"
+        lines = repaired.split('\n')
+        fixed_lines = []
+        for line in lines:
+            # If line has a key:value pattern with string value
+            m = re.match(r'^(\s*"[^"]+"\s*:\s*")(.*)(",?\s*)$', line)
+            if m:
+                prefix, val, suffix = m.groups()
+                # Escape unescaped quotes in the value
+                val = val.replace('\\"', '\x00').replace('"', '\\"').replace('\x00', '\\"')
+                line = prefix + val + suffix
+            fixed_lines.append(line)
+        repaired = '\n'.join(fixed_lines)
+
+        try:
+            result = json.loads(repaired)
+            logger.info("JSON repaired successfully")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+        # Last resort: try to extract just the damaged_parts array and build minimal response
+        try:
+            # Find the outermost JSON object
+            start = repaired.index('{')
+            depth = 0
+            end = start
+            for i in range(start, len(repaired)):
+                if repaired[i] == '{': depth += 1
+                elif repaired[i] == '}': depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+            # Truncate at last complete object/array
+            truncated = repaired[start:end]
+            result = json.loads(truncated)
+            logger.info("JSON recovered via truncation")
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Final fallback: extract what we can
+        logger.warning(f"JSON parse failed, attempting field extraction. Raw length: {len(cleaned)}")
+        fallback = {
+            "vehicle": req.vehicle,
+            "overall_assessment": "Analysis completed but response format was unexpected. Please try again.",
+            "estimated_severity": "moderate",
+            "structural_integrity": "unknown",
+            "driveable": True,
+            "safety_concerns": [],
+            "recommended_next_steps": ["Re-run analysis or consult a professional"],
+            "damaged_parts": []
+        }
+
+        # Try to extract individual parts from the malformed JSON
+        part_pattern = r'\{[^{}]*"part_name"\s*:\s*"([^"]+)"[^{}]*\}'
+        for match in re.finditer(part_pattern, cleaned):
+            try:
+                part_json = match.group(0)
+                # Fix trailing commas
+                part_json = re.sub(r',\s*}', '}', part_json)
+                part = json.loads(part_json)
+                fallback["damaged_parts"].append(part)
+            except json.JSONDecodeError:
+                continue
+
+        if fallback["damaged_parts"]:
+            logger.info(f"Extracted {len(fallback['damaged_parts'])} parts from malformed JSON")
+        return fallback
 
     except HTTPException:
         raise
