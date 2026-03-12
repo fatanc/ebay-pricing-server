@@ -726,7 +726,7 @@ async def analyze_damage(req: AnalyzeRequest):
 
     # Build message content with images
     content = []
-    for img in req.images[:8]:
+    for img in req.images[:20]:
         content.append({
             "type": "image",
             "source": {
@@ -1262,7 +1262,7 @@ function renderUpload(app){
           imgSection.querySelector('button').disabled=true;
           const loaded=[];
           const previews=[];
-          for(const img of lotImgs.slice(0,8)){
+          for(const img of lotImgs.slice(0,20)){
             try{
               const r=await fetch(img.url);
               if(!r.ok)continue;
@@ -1296,7 +1296,7 @@ function renderUpload(app){
   card1.appendChild(h('div',{className:'card-title'},
     h('span',{innerHTML:'<svg width="18" height="18" fill="none" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="1.5"/><circle cx="8.5" cy="8.5" r="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M21 15l-5-5L5 21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),
     ' Damage Photos ',
-    h('span',{className:'badge'},state.images.length+'/8')));
+    h('span',{className:'badge'},state.images.length+'/20')));
 
   const inp=h('input',{type:'file',accept:'image/*',multiple:true,style:{display:'none'},on:{change:e=>handleFiles(e.target.files)}});
   card1.appendChild(inp);
@@ -1309,7 +1309,7 @@ function renderUpload(app){
   }},
     h('div',{innerHTML:'<svg width="48" height="48" fill="none" viewBox="0 0 48 48"><path d="M24 32V16m0 0l-8 8m8-8l8 8" stroke="#94A3B8" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="4" y="4" width="40" height="40" rx="12" stroke="#CBD5E1" stroke-width="2" stroke-dasharray="6 4"/></svg>'}),
     h('div',{className:'dropzone-label'},'Drop photos here or click to browse'),
-    h('div',{className:'dropzone-sub'},'Upload up to 8 images · JPG, PNG, WebP'));
+    h('div',{className:'dropzone-sub'},'Upload up to 20 images · JPG, PNG, WebP'));
   card1.appendChild(dz);
 
   if(state.previews.length>0){
@@ -1811,7 +1811,7 @@ function renderPricing(app){
 }
 
 function handleFiles(files){
-  const newFiles=Array.from(files).filter(f=>f.type.startsWith('image/')).slice(0,8-state.images.length);
+  const newFiles=Array.from(files).filter(f=>f.type.startsWith('image/')).slice(0,20-state.images.length);
   newFiles.forEach(f=>{
     state.images.push(f);
     const r=new FileReader();
