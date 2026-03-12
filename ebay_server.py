@@ -544,6 +544,12 @@ textarea.fi{resize:vertical;min-height:72px}
 .error{background:#FEF2F2;border:1px solid #FECACA;color:#991B1B;padding:12px 16px;border-radius:var(--radius-sm);font-size:14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;animation:fadeIn .3s ease}
 .spinner{width:24px;height:24px;animation:spin 1s linear infinite}
 @media(max-width:640px){.form-row{grid-template-columns:1fr 1fr}.overview-stats{grid-template-columns:1fr 1fr}.lg{grid-template-columns:1fr}.app{padding:20px 16px 48px}.step{padding:6px 8px;font-size:12px}}
+.ac-wrap{position:relative}
+.ac-list{position:absolute;top:100%;left:0;right:0;max-height:220px;overflow-y:auto;background:var(--surface);border:1px solid var(--accent);border-radius:0 0 var(--radius-sm) var(--radius-sm);box-shadow:var(--shadow-md);z-index:100;margin-top:-1px}
+.ac-item{padding:8px 14px;font-size:14px;cursor:pointer;transition:background .1s}
+.ac-item:hover,.ac-item.hl{background:var(--accent-light);color:var(--accent)}
+.ac-item.selected{font-weight:600;color:var(--accent)}
+.ac-empty{padding:10px 14px;font-size:13px;color:var(--text-tertiary);font-style:italic}
 </style>
 </head>
 <body>
@@ -553,7 +559,13 @@ const API = '';
 const SEV = {critical:{bg:'#FEE2E2',bd:'#F87171',tx:'#991B1B',dot:'#EF4444'},major:{bg:'#FEF3C7',bd:'#FBBF24',tx:'#92400E',dot:'#F59E0B'},moderate:{bg:'#FEF9C3',bd:'#FACC15',tx:'#854D0E',dot:'#EAB308'},minor:{bg:'#ECFDF5',bd:'#6EE7B7',tx:'#065F46',dot:'#10B981'}};
 const SLABEL = {critical:'Replace',major:'Repair / Replace',moderate:'Repair',minor:'Inspect'};
 
-let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+const YEARS=[];for(let y=2026;y>=1990;y--)YEARS.push(String(y));
+
+const VEHICLES={"Acura":["ILX","Integra","MDX","NSX","RDX","RLX","TL","TLX","TSX","ZDX"],"Alfa Romeo":["4C","Giulia","Giulietta","Stelvio","Tonale"],"Aston Martin":["DB11","DB12","DBS","DBX","Vantage"],"Audi":["A3","A4","A5","A6","A7","A8","e-tron","e-tron GT","Q3","Q4 e-tron","Q5","Q7","Q8","R8","RS3","RS5","RS6","RS7","S3","S4","S5","S6","S7","S8","TT"],"Bentley":["Bentayga","Continental GT","Flying Spur"],"BMW":["1 Series","2 Series","3 Series","4 Series","5 Series","6 Series","7 Series","8 Series","i3","i4","i5","i7","iX","iX3","M2","M3","M4","M5","M8","X1","X2","X3","X4","X5","X6","X7","Z4"],"Buick":["Enclave","Encore","Encore GX","Envision","LaCrosse","Regal"],"Cadillac":["ATS","CT4","CT5","CT6","CTS","Escalade","Lyriq","XT4","XT5","XT6"],"Chevrolet":["Blazer","Bolt","Camaro","Colorado","Corvette","Cruze","Equinox","Express","Impala","Malibu","Silverado 1500","Silverado 2500","Silverado 3500","Spark","Suburban","Tahoe","Trailblazer","Traverse","Trax"],"Chrysler":["300","Pacifica","Voyager"],"Citroën":["Berlingo","C3","C3 Aircross","C4","C5 Aircross","C5 X","ë-C4"],"Cupra":["Ateca","Born","Formentor","Leon","Tavascan"],"Dacia":["Duster","Jogger","Logan","Sandero","Spring"],"Dodge":["Challenger","Charger","Durango","Grand Caravan","Hornet","Ram 1500","Ram 2500","Ram 3500"],"Ferrari":["296 GTB","488","812","F8","Portofino","Purosangue","Roma","SF90"],"Fiat":["500","500e","500L","500X","Panda","Punto","Tipo"],"Ford":["Bronco","Bronco Sport","EcoSport","Edge","Escape","Expedition","Explorer","F-150","F-250","F-350","Fiesta","Flex","Focus","Fusion","Galaxy","Kuga","Maverick","Mondeo","Mustang","Mustang Mach-E","Puma","Ranger","Transit"],"Genesis":["G70","G80","G90","GV60","GV70","GV80"],"GMC":["Acadia","Canyon","Hummer EV","Sierra 1500","Sierra 2500","Sierra 3500","Terrain","Yukon"],"Honda":["Accord","Civic","CR-V","Fit","HR-V","Insight","Jazz","Odyssey","Passport","Pilot","Prologue","Ridgeline"],"Hyundai":["Accent","Elantra","i10","i20","i30","Ioniq","Ioniq 5","Ioniq 6","Kona","Nexo","Palisade","Santa Cruz","Santa Fe","Sonata","Staria","Tucson","Veloster","Venue"],"Infiniti":["Q50","Q60","QX50","QX55","QX60","QX80"],"Jaguar":["E-Pace","F-Pace","F-Type","I-Pace","XE","XF","XJ"],"Jeep":["Cherokee","Compass","Gladiator","Grand Cherokee","Grand Wagoneer","Renegade","Wagoneer","Wrangler"],"Kia":["Carnival","Ceed","EV6","EV9","Forte","K5","Niro","Optima","Picanto","Rio","Seltos","Sorento","Soul","Sportage","Stinger","Telluride"],"Lamborghini":["Aventador","Huracán","Revuelto","Urus"],"Land Rover":["Defender","Discovery","Discovery Sport","Range Rover","Range Rover Evoque","Range Rover Sport","Range Rover Velar"],"Lexus":["ES","GX","IS","LC","LS","LX","NX","RC","RX","RZ","TX","UX"],"Lincoln":["Aviator","Corsair","MKC","MKZ","Nautilus","Navigator"],"Lotus":["Eletre","Emira","Evija"],"Maserati":["Ghibli","GranTurismo","Grecale","Levante","MC20","Quattroporte"],"Mazda":["CX-3","CX-30","CX-5","CX-50","CX-60","CX-9","CX-90","Mazda2","Mazda3","Mazda6","MX-30","MX-5 Miata"],"McLaren":["570S","600LT","720S","750S","765LT","Artura"],"Mercedes-Benz":["A-Class","AMG GT","B-Class","C-Class","CLA","CLE","CLS","E-Class","EQA","EQB","EQC","EQE","EQS","G-Class","GLA","GLB","GLC","GLE","GLS","S-Class","SL","Sprinter","V-Class","Vito"],"Mini":["Clubman","Convertible","Cooper","Countryman","Hardtop"],"Mitsubishi":["ASX","Eclipse Cross","L200","Mirage","Outlander","Outlander Sport","Pajero","Space Star","Triton"],"Nissan":["370Z","Altima","Ariya","Armada","Frontier","Juke","Kicks","Leaf","Maxima","Murano","Navara","Pathfinder","Qashqai","Rogue","Sentra","Titan","Versa","X-Trail","Z"],"Opel":["Astra","Combo","Corsa","Crossland","Grandland","Mokka","Vivaro","Zafira"],"Peugeot":["2008","208","3008","308","408","5008","508","Rifter","Traveller"],"Polestar":["Polestar 1","Polestar 2","Polestar 3","Polestar 4"],"Porsche":["718 Boxster","718 Cayman","911","Cayenne","Macan","Panamera","Taycan"],"Ram":["1500","2500","3500","ProMaster"],"Renault":["Arkana","Captur","Clio","Espace","Kangoo","Koleos","Megane","Scenic","Trafic","Twingo","Zoe"],"Rivian":["R1S","R1T","R2"],"Rolls-Royce":["Cullinan","Dawn","Ghost","Phantom","Spectre","Wraith"],"Saab":["9-3","9-5"],"SEAT":["Arona","Ateca","Ibiza","Leon","Tarraco"],"Škoda":["Enyaq","Fabia","Kamiq","Karoq","Kodiaq","Octavia","Scala","Superb"],"Smart":["EQ fortwo","#1","#3"],"Subaru":["Ascent","BRZ","Crosstrek","Forester","Impreza","Legacy","Outback","Solterra","WRX"],"Suzuki":["Across","Baleno","Ignis","Jimny","S-Cross","Swift","Vitara"],"Tesla":["Cybertruck","Model 3","Model S","Model X","Model Y"],"Toyota":["4Runner","86","Avalon","bZ4X","C-HR","Camry","Corolla","Corolla Cross","GR86","GR Supra","Highlander","Land Cruiser","Mirai","Prius","RAV4","Sequoia","Sienna","Tacoma","Tundra","Venza","Yaris","Yaris Cross"],"Volkswagen":["Arteon","Atlas","Atlas Cross Sport","Caddy","Golf","Golf GTI","Golf R","ID.3","ID.4","ID.5","ID.7","ID. Buzz","Jetta","Passat","Polo","T-Cross","T-Roc","Taos","Tiguan","Touareg","Touran","Transporter"],"Volvo":["C40 Recharge","EX30","EX90","S60","S90","V60","V90","XC40","XC60","XC90"]};
+
+const MAKES=Object.keys(VEHICLES).sort();
+
+let state = {step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null,openAC:null,acFilter:{},acHL:{}};
 
 function $(sel){return document.querySelector(sel)}
 function h(tag,attrs,...children){
@@ -567,6 +579,42 @@ function h(tag,attrs,...children){
   });
   children.flat(Infinity).filter(c=>c!=null&&c!==false).forEach(c=>el.appendChild(typeof c==='string'?document.createTextNode(c):c));
   return el;
+}
+
+function makeAC(label,key,options,value,onChange){
+  const wrap=h('div',{className:'fg'});
+  wrap.appendChild(h('label',{className:'fl'},label));
+  const acWrap=h('div',{className:'ac-wrap'});
+  const filter=state.acFilter[key]!=null?state.acFilter[key]:(value||'');
+  const inp=h('input',{className:'fi',placeholder:options.length?'Type to search...':'Select make first',value:filter,on:{
+    focus:()=>{state.openAC=key;state.acFilter[key]=state.acFilter[key]!=null?state.acFilter[key]:'';state.acHL[key]=-1;render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el){el.focus();el.selectionStart=el.value.length;}},10);},
+    input:e=>{state.acFilter[key]=e.target.value;state.acHL[key]=-1;render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el){el.focus();el.selectionStart=el.value.length;}},10);},
+    keydown:e=>{
+      const filtered=options.filter(o=>o.toLowerCase().includes((state.acFilter[key]||'').toLowerCase()));
+      if(e.key==='ArrowDown'){e.preventDefault();state.acHL[key]=Math.min((state.acHL[key]||0)+1,filtered.length-1);render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el)el.focus();},10);}
+      else if(e.key==='ArrowUp'){e.preventDefault();state.acHL[key]=Math.max((state.acHL[key]||0)-1,0);render();setTimeout(()=>{const el=document.querySelector('.ac-wrap .fi[data-ac=\"'+key+'\"]');if(el)el.focus();},10);}
+      else if(e.key==='Enter'&&state.acHL[key]>=0&&filtered[state.acHL[key]]){e.preventDefault();state.acFilter[key]=null;state.openAC=null;onChange(filtered[state.acHL[key]]);render();}
+      else if(e.key==='Escape'){state.openAC=null;state.acFilter[key]=null;render();}
+    },
+    blur:()=>{setTimeout(()=>{if(state.openAC===key){state.openAC=null;state.acFilter[key]=null;render();}},200);}
+  }});
+  inp.setAttribute('data-ac',key);
+  inp.setAttribute('autocomplete','off');
+  acWrap.appendChild(inp);
+
+  if(state.openAC===key){
+    const list=h('div',{className:'ac-list'});
+    const q=(state.acFilter[key]||'').toLowerCase();
+    const filtered=options.filter(o=>o.toLowerCase().includes(q));
+    if(filtered.length===0){list.appendChild(h('div',{className:'ac-empty'},'No matches'));}
+    else filtered.slice(0,50).forEach((opt,i)=>{
+      const cls='ac-item'+(opt===value?' selected':'')+(i===state.acHL[key]?' hl':'');
+      list.appendChild(h('div',{className:cls,on:{mousedown:e=>{e.preventDefault();state.acFilter[key]=null;state.openAC=null;onChange(opt);}}},opt));
+    });
+    acWrap.appendChild(list);
+  }
+  wrap.appendChild(acWrap);
+  return wrap;
 }
 
 function render(){
@@ -647,11 +695,21 @@ function renderUpload(app){
     ' Vehicle Information'));
 
   const row=h('div',{className:'form-row'});
-  [['Year','year','2020'],['Make','make','Toyota'],['Model','model','Camry'],['Trim','trim','SE']].forEach(([l,k,p])=>{
-    row.appendChild(h('div',{className:'fg'},
-      h('label',{className:'fl'},l+(k!=='trim'?' *':'')),
-      h('input',{className:'fi',placeholder:p,value:state.vehicle[k],on:{input:e=>{state.vehicle[k]=e.target.value;}}})));
-  });
+
+  // Year dropdown
+  row.appendChild(makeAC('Year *','year',YEARS,state.vehicle.year,v=>{state.vehicle.year=v;render();}));
+
+  // Make dropdown (all makes)
+  row.appendChild(makeAC('Make *','make',MAKES,state.vehicle.make,v=>{state.vehicle.make=v;state.vehicle.model='';render();}));
+
+  // Model dropdown (filtered by selected make)
+  const models=state.vehicle.make&&VEHICLES[state.vehicle.make]?VEHICLES[state.vehicle.make]:[];
+  row.appendChild(makeAC('Model *','model',models,state.vehicle.model,v=>{state.vehicle.model=v;render();}));
+
+  // Trim - plain input
+  row.appendChild(h('div',{className:'fg'},
+    h('label',{className:'fl'},'Trim'),
+    h('input',{className:'fi',placeholder:'SE, Sport, Limited...',value:state.vehicle.trim,on:{input:e=>{state.vehicle.trim=e.target.value;}}})));
   card2.appendChild(row);
 
   const row2=h('div',{style:{display:'grid',gridTemplateColumns:'1fr 2fr',gap:'12px',marginTop:'12px'}});
@@ -880,7 +938,7 @@ async function fetchPricing(){
 
 function resetAll(){
   clearInterval(state.progressTimer);
-  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null};
+  state={step:'upload',images:[],previews:[],vehicle:{year:'',make:'',model:'',trim:''},mileage:'',notes:'',result:null,pricing:null,pricingLoading:false,progress:0,error:null,expanded:null,progressTimer:null,openAC:null,acFilter:{},acHL:{}};
   render();
 }
 
