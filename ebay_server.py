@@ -423,11 +423,55 @@ async def fetch_lot(url: str = Query(..., description="Auction listing URL")):
                     break
 
             if not lot:
-                # Lot not found on AutoBidMaster — could be expired, sold, or wrong lot number
-                # If this was a Copart redirect, give a specific message
-                if copart_lot:
-                    raise HTTPException(404, f"Lot #{copart_lot} was not found on AutoBidMaster. The lot may have been sold, expired, or the number might be incorrect. Try pasting the full AutoBidMaster URL instead.")
-                raise HTTPException(404, "This lot was not found on AutoBidMaster. It may have been sold or expired. Try a different listing URL.")
+                # Lot not found — probably sold/expired. ABM redirected to search page.
+                # Extract what we can from the URL slug (e.g. "iaa-2009-acura-tl-vage")
+                slug_match = re.search(r'/lot/\d+/(?:copart|iaa)-(\d{4})-(\w+)-(.*?)/?(?:\?|$)', url.lower())
+                if slug_match:
+                    slug_year = slug_match.group(1)
+                    slug_make = slug_match.group(2).title()
+                    slug_rest = slug_match.group(3)
+                    # Clean model: remove title types, state codes, locations
+                    slug_rest = re.sub(r'-(?:certificate-of-title|salvage|clean-title|rebuilt|certificate)(?:-.*)?$', '', slug_rest)
+                    slug_rest = re.sub(r'-(?:va|ca|tx|fl|ny|pa|oh|il|ga|nc|nj|mi|az|wa|ma|tn|md|in|mo|wi|mn|co|al|sc|la|ky|or|ok|ct|ia|ms|ar|ks|nv|ut|ne|nm|wv|id|hi|me|nh|ri|mt|de|sd|nd|ak|vt|wy|dc)(?:-[a-z-]+)?$', '', slug_rest)
+                    slug_rest = re.sub(r'-[a-z]{2,5}$', '', slug_rest) if len(slug_rest.split('-')) > 1 else slug_rest
+                    slug_model = slug_rest.replace('-', ' ').title()
+                    platform = "IAAI" if "iaa-" in url.lower() else "Copart"
+                    lot_num_match = re.search(r'/lot/(\d+)', url)
+                    lot_num = lot_num_match.group(1) if lot_num_match else None
+
+                    return {
+                        "source": "autobidmaster",
+                        "source_url": url,
+                        "extraction_method": "url_slug_only",
+                        "lot_expired": True,
+                        "vehicle": {
+                            "year": int(slug_year),
+                            "make": slug_make,
+                            "model": slug_model,
+                            "description": f"{slug_year} {slug_make} {slug_model}",
+                            "vin": "", "color": "", "engine": "", "cylinders": None,
+                            "drive": "", "transmission": "", "fuel": "", "body_style": "",
+                            "odometer": None, "odometer_type": "mi", "odometer_brand": "",
+                        },
+                        "auction": {
+                            "platform": platform,
+                            "lot_number": int(lot_num) if lot_num else None,
+                            "current_bid": None, "buy_now": None, "suggested_bid": None,
+                            "starting_bid": None, "currency": "USD", "sale_date": None,
+                            "sale_status": "Sold / Expired",
+                            "sold": True, "location": "", "location_state": "",
+                        },
+                        "condition": {
+                            "primary_damage": "", "secondary_damage": "",
+                            "title_type": "", "title_state": "", "run_drives": "",
+                            "driveable": None, "keys": "", "airbag_status": "",
+                            "engine_missing": False, "transmission_missing": False,
+                        },
+                        "valuation": {"acv": None, "repair_cost": None},
+                        "images": [],
+                    }
+                # Can't even parse the slug
+                raise HTTPException(404, "This lot is no longer available on AutoBidMaster (sold or expired). You can still enter the vehicle details manually below.")
 
             # Extract images (full resolution)
             images = []
@@ -1228,15 +1272,24 @@ function renderUpload(app){
     const a=ld.auction||{};
     const c=ld.condition||{};
     const val=ld.valuation||{};
-    const summary=h('div',{style:{marginTop:'16px',padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-md)',border:'1px solid var(--border)'}});
+    const summary=h('div',{style:{marginTop:'16px',padding:'16px',background:'var(--bg)',borderRadius:'var(--radius-md)',border:'1px solid '+(ld.lot_expired?'#FDE68A':'var(--border)')}});
+
+    // Expired lot banner
+    if(ld.lot_expired){
+      summary.appendChild(h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 12px',background:'#FEF3C7',borderRadius:'6px',marginBottom:'12px',fontSize:'13px',color:'#92400E'}},
+        h('span',null,'\u26A0'),
+        h('div',null,
+          h('strong',null,'Lot no longer available'),
+          ' — vehicle info extracted from URL. Upload photos manually and verify details below.')));
+    }
 
     const row1=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'8px'}});
     row1.appendChild(h('div',null,
       h('div',{style:{fontWeight:'600',fontSize:'15px'}},v.description||(v.year+' '+v.make+' '+v.model)),
       h('div',{style:{fontSize:'12px',color:'var(--text-tertiary)',marginTop:'2px'}},
         [a.platform,a.lot_number?'Lot #'+a.lot_number:'',a.location].filter(Boolean).join(' · '))));
-    row1.appendChild(h('span',{className:'tag '+(ld.extraction_method==='native_json'?'tag-body':'tag-electrical'),style:{fontSize:'11px'}},
-      ld.source||'unknown'));
+    row1.appendChild(h('span',{className:'tag '+(ld.lot_expired?'tag-lighting':ld.extraction_method==='native_json'?'tag-body':'tag-electrical'),style:{fontSize:'11px'}},
+      ld.lot_expired?'Expired':ld.source||'unknown'));
     summary.appendChild(row1);
 
     const chips=h('div',{style:{display:'flex',flexWrap:'wrap',gap:'6px',marginTop:'8px'}});
