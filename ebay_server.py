@@ -1770,13 +1770,15 @@ function renderPricing(app){
       });
       card.appendChild(grid);
     }
-    // External search links (rrr.lt, Google)
+    // External search links
     const extLinks=h('div',{style:{padding:'8px 20px 14px',display:'flex',gap:'10px',flexWrap:'wrap'}});
-    const rrrQuery=encodeURIComponent(d.query||vName+' '+d.part);
-    extLinks.appendChild(h('a',{href:'https://rrr.lt/en?q='+rrrQuery+'&exact=1',target:'_blank',rel:'noopener noreferrer',
+    const partQuery=d.part;
+    const rrrGoogleQuery=encodeURIComponent('site:rrr.lt '+vName+' '+partQuery);
+    extLinks.appendChild(h('a',{href:'https://www.google.com/search?q='+rrrGoogleQuery,target:'_blank',rel:'noopener noreferrer',
       style:{fontSize:'12px',color:'#059669',textDecoration:'none',display:'inline-flex',alignItems:'center',gap:'4px',padding:'4px 10px',border:'1px solid #A7F3D0',borderRadius:'20px',background:'#ECFDF5',fontWeight:'500'}},
-      h('span',{innerHTML:'<svg width="12" height="12" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),' Search on RRR.lt'));
-    extLinks.appendChild(h('a',{href:'https://www.google.com/search?q='+rrrQuery+'+used+OEM+part',target:'_blank',rel:'noopener noreferrer',
+      h('span',{innerHTML:'<svg width="12" height="12" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),' Find on RRR.lt'));
+    const googleQuery=encodeURIComponent(vName+' '+partQuery+' used OEM part buy');
+    extLinks.appendChild(h('a',{href:'https://www.google.com/search?q='+googleQuery,target:'_blank',rel:'noopener noreferrer',
       style:{fontSize:'12px',color:'var(--text-tertiary)',textDecoration:'none',display:'inline-flex',alignItems:'center',gap:'4px',padding:'4px 10px',border:'1px solid var(--border)',borderRadius:'20px',fontWeight:'500'}},
       h('span',{innerHTML:'<svg width="12" height="12" fill="none" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'}),' Google'));
     card.appendChild(extLinks);
