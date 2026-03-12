@@ -360,6 +360,34 @@ async def fetch_lot(url: str = Query(..., description="Auction listing URL")):
         "Cookie": "screenSize=1920x1080",
     }
 
+    # ── Copart/IAAI → route through AutoBidMaster ──
+    # These sites are JS-rendered and block server scraping.
+    # AutoBidMaster mirrors Copart/IAAI lots with SSR content.
+    copart_lot = None
+    if "copart.com" in url:
+        import re as _re
+        m = _re.search(r'/lot/(\d+)', url)
+        if m:
+            copart_lot = m.group(1)
+        else:
+            # Try extracting lot number from the end of URL
+            m = _re.search(r'(\d{7,9})', url)
+            if m:
+                copart_lot = m.group(1)
+        if copart_lot:
+            url = f"https://www.autobidmaster.com/en/search/lot/{copart_lot}/"
+            logger.info(f"Redirecting Copart lot {copart_lot} through AutoBidMaster")
+        else:
+            raise HTTPException(400, "Could not extract lot number from Copart URL. Please use the full lot URL (e.g. copart.com/lot/12345678)")
+
+    if "iaai.com" in url:
+        import re as _re
+        m = _re.search(r'/VehicleDetail/(\d+)', url) or _re.search(r'(\d{7,9})', url)
+        if m:
+            iaai_lot = m.group(1)
+            url = f"https://www.autobidmaster.com/en/search/lot/{iaai_lot}/"
+            logger.info(f"Redirecting IAAI lot {iaai_lot} through AutoBidMaster")
+
     # ── Tier 1: AutoBidMaster native extraction ──
     if "autobidmaster.com" in url:
         # Ensure fallback=true for SSR content
@@ -1742,6 +1770,16 @@ function renderPricing(app){
       });
       card.appendChild(grid);
     }
+    // External search links (rrr.lt, Google)
+    const extLinks=h('div',{style:{padding:'8px 20px 14px',display:'flex',gap:'10px',flexWrap:'wrap'}});
+    const rrrQuery=encodeURIComponent(d.query||vName+' '+d.part);
+    extLinks.appendChild(h('a',{href:'https://rrr.lt/en?q='+rrrQuery+'&exact=1',target:'_blank',rel:'noopener noreferrer',
+      style:{fontSize:'12px',color:'#059669',textDecoration:'none',display:'inline-flex',alignItems:'center',gap:'4px',padding:'4px 10px',border:'1px solid #A7F3D0',borderRadius:'20px',background:'#ECFDF5',fontWeight:'500'}},
+      h('span',{innerHTML:'<svg width="12" height="12" fill="none" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6m4-3h6v6m-11 5L21 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'}),' Search on RRR.lt'));
+    extLinks.appendChild(h('a',{href:'https://www.google.com/search?q='+rrrQuery+'+used+OEM+part',target:'_blank',rel:'noopener noreferrer',
+      style:{fontSize:'12px',color:'var(--text-tertiary)',textDecoration:'none',display:'inline-flex',alignItems:'center',gap:'4px',padding:'4px 10px',border:'1px solid var(--border)',borderRadius:'20px',fontWeight:'500'}},
+      h('span',{innerHTML:'<svg width="12" height="12" fill="none" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'}),' Google'));
+    card.appendChild(extLinks);
     app.appendChild(card);
   });
 
